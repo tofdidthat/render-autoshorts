@@ -50,7 +50,7 @@ app.post('/render', upload.fields([
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'stillimage',
-      '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
+      '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
       '-pix_fmt', 'yuv420p',
       '-r', '1',
       '-c:a', 'aac',
