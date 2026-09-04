@@ -52,7 +52,7 @@ app.post('/render', upload.fields([
       '-tune', 'stillimage',
       '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
       '-pix_fmt', 'yuv420p',
-      '-r', '30',
+      '-r', '1',
       '-c:a', 'aac',
       '-b:a', '192k',
       '-shortest',
