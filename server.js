@@ -44,6 +44,7 @@ app.post('/render', upload.fields([
 
     await execFileAsync('ffmpeg', [
       '-y',
+      '-framerate', '1',
       '-loop', '1',
       '-i', cover.path,
       '-i', audio.path,
