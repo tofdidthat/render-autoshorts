@@ -42,6 +42,8 @@ app.post('/render', upload.fields([
 
     outputPath = path.join(os.tmpdir(), `${crypto.randomUUID()}.mp4`)
 
+    const startedAt = Date.now()
+    
     await execFileAsync('ffmpeg', [
       '-y',
       '-framerate', '1',
@@ -61,6 +63,10 @@ app.post('/render', upload.fields([
       outputPath
     ])
 
+console.log(
+  `FFmpeg terminou em ${((Date.now() - startedAt) / 1000).toFixed(2)}s`
+)
+    
     res.setHeader('Content-Type', 'video/mp4')
     res.setHeader('Content-Disposition', 'attachment; filename="autoshorts.mp4"')
 
