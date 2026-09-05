@@ -8,15 +8,24 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
+
 const app = express()
 const port = process.env.PORT || 8080
 
 const RENDER_TTL_MS = 10 * 60 * 1000
+
 const renders = new Map()
+
+app.use(express.json({
+  limit: '1mb'
+}))
 
 // CORS
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader(
+    'Access-Control-Allow-Origin',
+    '*'
+  )
 
   res.setHeader(
     'Access-Control-Allow-Methods',
@@ -28,7 +37,6 @@ app.use((req, res, next) => {
     'Content-Type'
   )
 
-  // Permite que o navegador leia o renderId
   res.setHeader(
     'Access-Control-Expose-Headers',
     'X-Render-Id'
@@ -64,9 +72,12 @@ function deleteRender(renderId) {
   }
 
   deleteFile(render.path)
+
   renders.delete(renderId)
 
-  console.log(`Render removido: ${renderId}`)
+  console.log(
+    `Render removido: ${renderId}`
+  )
 
   return true
 }
@@ -77,16 +88,52 @@ function scheduleRenderCleanup(renderId) {
   }, RENDER_TTL_MS)
 }
 
-// Limpeza extra caso algum timer não execute
 setInterval(() => {
   const now = Date.now()
 
-  for (const [renderId, render] of renders.entries()) {
-    if (now - render.createdAt >= RENDER_TTL_MS) {
+  for (
+    const [renderId, render]
+    of renders.entries()
+  ) {
+    if (
+      now - render.createdAt >=
+      RENDER_TTL_MS
+    ) {
       deleteRender(renderId)
     }
   }
 }, 60 * 1000).unref()
+
+function validateTikTokUploadUrl(
+  uploadUrl
+) {
+  let parsed
+
+  try {
+    parsed = new URL(uploadUrl)
+  } catch {
+    throw new Error(
+      'URL de upload do TikTok inválida.'
+    )
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error(
+      'URL de upload do TikTok deve usar HTTPS.'
+    )
+  }
+
+  if (
+    parsed.hostname !==
+    'open-upload.tiktokapis.com'
+  ) {
+    throw new Error(
+      'Domínio de upload do TikTok não permitido.'
+    )
+  }
+
+  return parsed.toString()
+}
 
 app.get('/', (req, res) => {
   res.json({
@@ -104,6 +151,7 @@ app.post(
       name: 'cover',
       maxCount: 1
     },
+
     {
       name: 'audio',
       maxCount: 1
@@ -111,8 +159,11 @@ app.post(
   ]),
 
   async (req, res) => {
-    const cover = req.files?.cover?.[0]
-    const audio = req.files?.audio?.[0]
+    const cover =
+      req.files?.cover?.[0]
+
+    const audio =
+      req.files?.audio?.[0]
 
     let outputPath = null
     let renderId = null
@@ -128,88 +179,111 @@ app.post(
         cleanupInputs()
 
         return res.status(400).json({
-          error: 'Envie cover e audio.'
+          error:
+            'Envie cover e audio.'
         })
       }
 
-      renderId = crypto.randomUUID()
+      renderId =
+        crypto.randomUUID()
 
       outputPath = path.join(
         os.tmpdir(),
         `${renderId}.mp4`
       )
 
-      const startedAt = Date.now()
+      const startedAt =
+        Date.now()
 
-      await execFileAsync('ffmpeg', [
-        '-y',
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
 
-        '-framerate',
-        '1',
+          '-framerate',
+          '1',
 
-        '-loop',
-        '1',
+          '-loop',
+          '1',
 
-        '-i',
-        cover.path,
+          '-i',
+          cover.path,
 
-        '-i',
-        audio.path,
+          '-i',
+          audio.path,
 
-        '-c:v',
-        'libx264',
+          '-c:v',
+          'libx264',
 
-        '-preset',
-        'ultrafast',
+          '-preset',
+          'ultrafast',
 
-        '-tune',
-        'stillimage',
+          '-tune',
+          'stillimage',
 
-        '-vf',
-        'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
+          '-vf',
+          'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
 
-        '-pix_fmt',
-        'yuv420p',
+          '-pix_fmt',
+          'yuv420p',
 
-        '-r',
-        '1',
+          '-r',
+          '1',
 
-        '-c:a',
-        'aac',
+          '-c:a',
+          'aac',
 
-        '-b:a',
-        '192k',
+          '-b:a',
+          '192k',
 
-        '-shortest',
+          '-shortest',
 
-        '-movflags',
-        '+faststart',
+          '-movflags',
+          '+faststart',
 
-        outputPath
-      ])
+          outputPath
+        ]
+      )
 
       const ffmpegSeconds =
-        ((Date.now() - startedAt) / 1000).toFixed(2)
+        (
+          (
+            Date.now() -
+            startedAt
+          ) /
+          1000
+        ).toFixed(2)
 
       console.log(
         `FFmpeg terminou em ${ffmpegSeconds}s`
       )
 
-      const stats = fs.statSync(outputPath)
+      const stats =
+        fs.statSync(outputPath)
 
-      renders.set(renderId, {
-        id: renderId,
-        path: outputPath,
-        size: stats.size,
-        mimeType: 'video/mp4',
-        createdAt: Date.now()
-      })
+      renders.set(
+        renderId,
+        {
+          id: renderId,
+          path: outputPath,
+          size: stats.size,
+          mimeType: 'video/mp4',
+          createdAt: Date.now()
+        }
+      )
 
       renderSaved = true
-      scheduleRenderCleanup(renderId)
+
+      scheduleRenderCleanup(
+        renderId
+      )
 
       console.log(
-        `Render temporário salvo: ${renderId} - ${(stats.size / 1024 / 1024).toFixed(2)} MB`
+        `Render temporário salvo: ${renderId} - ${(
+          stats.size /
+          1024 /
+          1024
+        ).toFixed(2)} MB`
       )
 
       cleanupInputs()
@@ -230,94 +304,346 @@ app.post(
       )
 
       const stream =
-        fs.createReadStream(outputPath)
-
-      stream.on('error', error => {
-        console.error(
-          'Erro ao enviar MP4:',
-          error
+        fs.createReadStream(
+          outputPath
         )
 
-        if (!res.headersSent) {
-          res.status(500).json({
-            error: 'Falha ao enviar o vídeo.'
-          })
-        } else {
-          res.destroy(error)
+      stream.on(
+        'error',
+        error => {
+          console.error(
+            'Erro ao enviar MP4:',
+            error
+          )
+
+          if (!res.headersSent) {
+            res.status(500).json({
+              error:
+                'Falha ao enviar o vídeo.'
+            })
+          } else {
+            res.destroy(error)
+          }
         }
-      })
+      )
 
       stream.pipe(res)
-
     } catch (error) {
       console.error(error)
 
       cleanupInputs()
 
-      // Se o render não chegou a ser salvo,
-      // podemos apagar imediatamente.
       if (!renderSaved) {
         deleteFile(outputPath)
       }
 
       if (!res.headersSent) {
         res.status(500).json({
-          error: 'Falha ao renderizar vídeo.',
-          details: error?.message
+          error:
+            'Falha ao renderizar vídeo.',
+
+          details:
+            error?.message
         })
       }
     }
   }
 )
 
-// Permite confirmar que um render temporário existe
-app.get('/render/:renderId', (req, res) => {
-  const render = renders.get(
-    req.params.renderId
-  )
+// Verifica render temporário
+app.get(
+  '/render/:renderId',
 
-  if (!render || !fs.existsSync(render.path)) {
-    return res.status(404).json({
-      error: 'Render não encontrado ou expirado.'
+  (req, res) => {
+    const render =
+      renders.get(
+        req.params.renderId
+      )
+
+    if (
+      !render ||
+      !fs.existsSync(
+        render.path
+      )
+    ) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Render não encontrado ou expirado.'
+        })
+    }
+
+    const expiresInMs =
+      Math.max(
+        0,
+
+        RENDER_TTL_MS -
+          (
+            Date.now() -
+            render.createdAt
+          )
+      )
+
+    res.json({
+      ok: true,
+
+      renderId:
+        render.id,
+
+      size:
+        render.size,
+
+      mimeType:
+        render.mimeType,
+
+      expiresInSeconds:
+        Math.ceil(
+          expiresInMs /
+          1000
+        )
     })
   }
+)
 
-  const expiresInMs =
-    Math.max(
-      0,
-      RENDER_TTL_MS -
-      (Date.now() - render.createdAt)
-    )
+// Envia diretamente do Railway ao TikTok
+app.post(
+  '/upload-tiktok',
 
-  res.json({
-    ok: true,
-    renderId: render.id,
-    size: render.size,
-    mimeType: render.mimeType,
-    expiresInSeconds:
-      Math.ceil(expiresInMs / 1000)
-  })
-})
+  async (req, res) => {
+    try {
+      const {
+        renderId,
+        uploadUrl,
+        chunkSize,
+        totalChunkCount
+      } = req.body || {}
 
-// Permite apagar o render depois que terminarmos de usá-lo
-app.delete('/render/:renderId', (req, res) => {
-  const deleted =
-    deleteRender(req.params.renderId)
+      if (!renderId) {
+        return res
+          .status(400)
+          .json({
+            error:
+              'renderId não informado.'
+          })
+      }
 
-  if (!deleted) {
-    return res.status(404).json({
-      error: 'Render não encontrado.'
+      if (!uploadUrl) {
+        return res
+          .status(400)
+          .json({
+            error:
+              'uploadUrl não informada.'
+          })
+      }
+
+      const render =
+        renders.get(renderId)
+
+      if (
+        !render ||
+        !fs.existsSync(
+          render.path
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              'Render não encontrado ou expirado.'
+          })
+      }
+
+      const safeUploadUrl =
+        validateTikTokUploadUrl(
+          uploadUrl
+        )
+
+      const fileSize =
+        render.size
+
+      const requestedChunkSize =
+        Number(chunkSize)
+
+      const requestedChunkCount =
+        Number(totalChunkCount)
+
+      const actualChunkSize =
+        Number.isFinite(
+          requestedChunkSize
+        ) &&
+        requestedChunkSize > 0
+          ? requestedChunkSize
+          : fileSize
+
+      const actualChunkCount =
+        Number.isFinite(
+          requestedChunkCount
+        ) &&
+        requestedChunkCount > 0
+          ? requestedChunkCount
+          : 1
+
+      console.log(
+        `TikTok upload iniciado: ${renderId}`
+      )
+
+      for (
+        let index = 0;
+        index <
+        actualChunkCount;
+        index++
+      ) {
+        const start =
+          index *
+          actualChunkSize
+
+        const endExclusive =
+          index ===
+          actualChunkCount - 1
+            ? fileSize
+            : Math.min(
+                start +
+                  actualChunkSize,
+                fileSize
+              )
+
+        if (
+          start >=
+          fileSize
+        ) {
+          break
+        }
+
+        const chunkLength =
+          endExclusive -
+          start
+
+        const chunk =
+          Buffer.allocUnsafe(
+            chunkLength
+          )
+
+        const fileHandle =
+          await fs.promises.open(
+            render.path,
+            'r'
+          )
+
+        try {
+          await fileHandle.read(
+            chunk,
+            0,
+            chunkLength,
+            start
+          )
+        } finally {
+          await fileHandle.close()
+        }
+
+        const tikTokResponse =
+          await fetch(
+            safeUploadUrl,
+            {
+              method: 'PUT',
+
+              headers: {
+                'Content-Type':
+                  'video/mp4',
+
+                'Content-Length':
+                  String(
+                    chunkLength
+                  ),
+
+                'Content-Range':
+                  `bytes ${start}-${endExclusive - 1}/${fileSize}`
+              },
+
+              body: chunk
+            }
+          )
+
+        if (
+          !tikTokResponse.ok
+        ) {
+          const errorText =
+            await tikTokResponse
+              .text()
+              .catch(
+                () => ''
+              )
+
+          throw new Error(
+            `TikTok respondeu HTTP ${tikTokResponse.status}${
+              errorText
+                ? `: ${errorText}`
+                : ''
+            }`
+          )
+        }
+
+        console.log(
+          `TikTok chunk ${index + 1}/${actualChunkCount} enviado`
+        )
+      }
+
+      console.log(
+        `TikTok upload concluído: ${renderId}`
+      )
+
+      return res.json({
+        ok: true,
+        renderId
+      })
+    } catch (error) {
+      console.error(
+        'Erro TikTok:',
+        error
+      )
+
+      return res
+        .status(500)
+        .json({
+          error:
+            'Falha ao enviar vídeo para o TikTok.',
+
+          details:
+            error?.message
+        })
+    }
+  }
+)
+
+// Apaga render temporário
+app.delete(
+  '/render/:renderId',
+
+  (req, res) => {
+    const deleted =
+      deleteRender(
+        req.params.renderId
+      )
+
+    if (!deleted) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Render não encontrado.'
+        })
+    }
+
+    res.json({
+      ok: true
     })
   }
-
-  res.json({
-    ok: true
-  })
-})
+)
 
 app.listen(
   port,
   '0.0.0.0',
+
   () => {
     console.log(
       `Render server listening on port ${port}`
