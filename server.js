@@ -649,6 +649,167 @@ app.delete(
   }
 )
 
+function validateYouTubeUploadUrl(uploadUrl) {
+  let parsed
+
+  try {
+    parsed = new URL(uploadUrl)
+  } catch {
+    throw new Error(
+      'URL de upload do YouTube inválida.'
+    )
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error(
+      'URL de upload do YouTube deve usar HTTPS.'
+    )
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+
+  const allowed =
+    hostname === 'www.googleapis.com' ||
+    hostname === 'youtube.googleapis.com' ||
+    hostname.endsWith('.googleapis.com')
+
+  if (!allowed) {
+    console.error(
+      'Host recebido do YouTube:',
+      hostname
+    )
+
+    throw new Error(
+      `Domínio de upload do YouTube não permitido: ${hostname}`
+    )
+  }
+
+  return parsed.toString()
+}
+
+
+// Envia diretamente do Railway para o YouTube
+app.post(
+  '/upload-youtube',
+
+  async (req, res) => {
+    try {
+      const {
+        renderId,
+        uploadUrl
+      } = req.body || {}
+
+      if (!renderId) {
+        return res.status(400).json({
+          error: 'renderId não informado.'
+        })
+      }
+
+      if (!uploadUrl) {
+        return res.status(400).json({
+          error: 'uploadUrl não informada.'
+        })
+      }
+
+      const render =
+        renders.get(renderId)
+
+      if (
+        !render ||
+        !fs.existsSync(render.path)
+      ) {
+        return res.status(404).json({
+          error:
+            'Render não encontrado ou expirado.'
+        })
+      }
+
+      const safeUploadUrl =
+        validateYouTubeUploadUrl(
+          uploadUrl
+        )
+
+      console.log(
+        `YouTube upload iniciado: ${renderId}`
+      )
+
+      const videoBuffer =
+        await fs.promises.readFile(
+          render.path
+        )
+
+      const youtubeResponse =
+        await fetch(
+          safeUploadUrl,
+          {
+            method: 'PUT',
+
+            headers: {
+              'Content-Type':
+                'video/mp4',
+
+              'Content-Length':
+                String(
+                  videoBuffer.length
+                )
+            },
+
+            body: videoBuffer
+          }
+        )
+
+      const responseText =
+        await youtubeResponse
+          .text()
+          .catch(() => '')
+
+      if (!youtubeResponse.ok) {
+        throw new Error(
+          `YouTube respondeu HTTP ${youtubeResponse.status}${
+            responseText
+              ? `: ${responseText}`
+              : ''
+          }`
+        )
+      }
+
+      let video = {}
+
+      if (responseText) {
+        try {
+          video =
+            JSON.parse(
+              responseText
+            )
+        } catch {}
+      }
+
+      console.log(
+        `YouTube upload concluído: ${renderId}`
+      )
+
+      return res.json({
+        ok: true,
+        renderId,
+        video
+      })
+    } catch (error) {
+      console.error(
+        'Erro YouTube:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Falha ao enviar vídeo para o YouTube.',
+
+        details:
+          error?.message
+      })
+    }
+  }
+)
+
 app.listen(
   port,
   '0.0.0.0',
