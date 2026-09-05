@@ -104,9 +104,7 @@ setInterval(() => {
   }
 }, 60 * 1000).unref()
 
-function validateTikTokUploadUrl(
-  uploadUrl
-) {
+function validateTikTokUploadUrl(uploadUrl) {
   let parsed
 
   try {
@@ -123,12 +121,20 @@ function validateTikTokUploadUrl(
     )
   }
 
-  if (
-    parsed.hostname !==
-    'open-upload.tiktokapis.com'
-  ) {
+  const hostname = parsed.hostname.toLowerCase()
+
+  const allowed =
+    hostname === 'open-upload.tiktokapis.com' ||
+    hostname.endsWith('.open-upload.tiktokapis.com')
+
+  if (!allowed) {
+    console.error(
+      'Host recebido do TikTok:',
+      hostname
+    )
+
     throw new Error(
-      'Domínio de upload do TikTok não permitido.'
+      `Domínio de upload do TikTok não permitido: ${hostname}`
     )
   }
 
