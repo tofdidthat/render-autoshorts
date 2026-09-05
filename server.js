@@ -125,7 +125,10 @@ function validateTikTokUploadUrl(uploadUrl) {
 
   const allowed =
     hostname === 'open-upload.tiktokapis.com' ||
-    hostname.endsWith('.open-upload.tiktokapis.com')
+    (
+      hostname.startsWith('open-upload-') &&
+      hostname.endsWith('.tiktokapis.com')
+    )
 
   if (!allowed) {
     console.error(
