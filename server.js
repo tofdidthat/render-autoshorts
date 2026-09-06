@@ -415,6 +415,63 @@ app.get(
   }
 )
 
+
+// ============================================================
+// INSTAGRAM
+// URL pública temporária para a Meta buscar o MP4
+// ============================================================
+
+app.get(
+  '/public-render/:renderId.mp4',
+
+  (req, res) => {
+    const { renderId } = req.params
+
+    const render =
+      renders.get(renderId)
+
+    if (
+      !render ||
+      !fs.existsSync(render.path)
+    ) {
+      if (render) {
+        renders.delete(renderId)
+      }
+
+      return res
+        .status(404)
+        .json({
+          error:
+            'Render não encontrado ou expirado.'
+        })
+    }
+
+    res.setHeader(
+      'Content-Type',
+      'video/mp4'
+    )
+
+    res.setHeader(
+      'Content-Disposition',
+      'inline'
+    )
+
+    res.setHeader(
+      'Cache-Control',
+      'public, max-age=300'
+    )
+
+    return res.sendFile(
+      path.resolve(render.path)
+    )
+  }
+)
+
+
+// ============================================================
+// TIKTOK
+// ============================================================
+
 // Envia diretamente do Railway ao TikTok
 app.post(
   '/upload-tiktok',
@@ -649,6 +706,11 @@ app.delete(
   }
 )
 
+
+// ============================================================
+// YOUTUBE
+// ============================================================
+
 function validateYouTubeUploadUrl(uploadUrl) {
   let parsed
 
@@ -666,7 +728,8 @@ function validateYouTubeUploadUrl(uploadUrl) {
     )
   }
 
-  const hostname = parsed.hostname.toLowerCase()
+  const hostname =
+    parsed.hostname.toLowerCase()
 
   const allowed =
     hostname === 'www.googleapis.com' ||
@@ -701,13 +764,15 @@ app.post(
 
       if (!renderId) {
         return res.status(400).json({
-          error: 'renderId não informado.'
+          error:
+            'renderId não informado.'
         })
       }
 
       if (!uploadUrl) {
         return res.status(400).json({
-          error: 'uploadUrl não informada.'
+          error:
+            'uploadUrl não informada.'
         })
       }
 
