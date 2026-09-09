@@ -359,6 +359,231 @@ app.post(
   }
 )
 
+// ============================================================
+// PREPARA VÍDEO JÁ PRONTO
+// Mantém o áudio original ou substitui por outro áudio
+// ============================================================
+
+app.post(
+  '/prepare-video',
+
+  upload.fields([
+    {
+      name: 'video',
+      maxCount: 1
+    },
+    {
+      name: 'audio',
+      maxCount: 1
+    }
+  ]),
+
+  async (req, res) => {
+    const video =
+      req.files?.video?.[0]
+
+    const audio =
+      req.files?.audio?.[0]
+
+    let outputPath = null
+    let renderId = null
+    let renderSaved = false
+
+    const cleanupInputs = () => {
+      deleteFile(video?.path)
+      deleteFile(audio?.path)
+    }
+
+    try {
+      if (!video) {
+        cleanupInputs()
+
+        return res.status(400).json({
+          error: 'Envie um vídeo.'
+        })
+      }
+
+      renderId = crypto.randomUUID()
+
+      outputPath = path.join(
+        os.tmpdir(),
+        `${renderId}.mp4`
+      )
+
+      const startedAt = Date.now()
+
+      if (audio) {
+        // Substitui completamente o áudio original
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+
+            '-i',
+            video.path,
+
+            '-i',
+            audio.path,
+
+            '-map',
+            '0:v:0',
+
+            '-map',
+            '1:a:0',
+
+            '-c:v',
+            'copy',
+
+            '-c:a',
+            'aac',
+
+            '-b:a',
+            '192k',
+
+            '-shortest',
+
+            '-movflags',
+            '+faststart',
+
+            outputPath
+          ]
+        )
+      } else {
+        // Mantém o vídeo e áudio originais.
+        // Remux para MP4 sem recodificar o vídeo.
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+
+            '-i',
+            video.path,
+
+            '-map',
+            '0:v:0',
+
+            '-map',
+            '0:a?',
+
+            '-c',
+            'copy',
+
+            '-movflags',
+            '+faststart',
+
+            outputPath
+          ]
+        )
+      }
+
+      const ffmpegSeconds =
+        (
+          (Date.now() - startedAt) /
+          1000
+        ).toFixed(2)
+
+      console.log(
+        `Prepare video terminou em ${ffmpegSeconds}s`
+      )
+
+      const stats =
+        fs.statSync(outputPath)
+
+      if (!stats.size) {
+        throw new Error(
+          'O vídeo processado está vazio.'
+        )
+      }
+
+      renders.set(
+        renderId,
+        {
+          id: renderId,
+          path: outputPath,
+          size: stats.size,
+          mimeType: 'video/mp4',
+          createdAt: Date.now()
+        }
+      )
+
+      renderSaved = true
+
+      scheduleRenderCleanup(renderId)
+
+      console.log(
+        `Vídeo temporário salvo: ${renderId} - ${(
+          stats.size /
+          1024 /
+          1024
+        ).toFixed(2)} MB`
+      )
+
+      cleanupInputs()
+
+      res.setHeader(
+        'Content-Type',
+        'video/mp4'
+      )
+
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="1ce.mp4"'
+      )
+
+      res.setHeader(
+        'X-Render-Id',
+        renderId
+      )
+
+      const stream =
+        fs.createReadStream(outputPath)
+
+      stream.on(
+        'error',
+        error => {
+          console.error(
+            'Erro ao enviar vídeo:',
+            error
+          )
+
+          if (!res.headersSent) {
+            res.status(500).json({
+              error:
+                'Falha ao enviar o vídeo.'
+            })
+          } else {
+            res.destroy(error)
+          }
+        }
+      )
+
+      stream.pipe(res)
+
+    } catch (error) {
+      console.error(
+        'Erro prepare-video:',
+        error
+      )
+
+      cleanupInputs()
+
+      if (!renderSaved) {
+        deleteFile(outputPath)
+      }
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          error:
+            'Falha ao preparar vídeo.',
+
+          details:
+            error?.message
+        })
+      }
+    }
+  }
+)
+
 // Verifica render temporário
 app.get(
   '/render/:renderId',
