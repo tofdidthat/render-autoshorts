@@ -110,13 +110,13 @@ async function sendTelegramFile({
   fieldName,
   fileName,
   mimeType,
+  chatId,
+  threadId = null,
   caption = ''
 }) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const chatId = process.env.TELEGRAM_CHAT_ID
-  const threadId = process.env.TELEGRAM_NEW_BEATS_THREAD_ID
 
-  if (!botToken || !chatId || !threadId) {
+  if (!botToken || !chatId) {
     throw new Error(
       'Variáveis do Telegram não configuradas no Railway.'
     )
@@ -132,10 +132,12 @@ async function sendTelegramFile({
     String(chatId)
   )
 
+ if (threadId) {
   formData.append(
     'message_thread_id',
     String(threadId)
   )
+}
 
   if (caption) {
     formData.append(
@@ -1182,9 +1184,11 @@ app.post(
 
   async (req, res) => {
     const {
-      renderId,
-      title
-    } = req.body || {}
+  renderId,
+  title,
+  chatId,
+  threadId
+} = req.body || {}
 
     let imagePath = null
     let audioPath = null
@@ -1196,6 +1200,12 @@ app.post(
         })
       }
 
+if (!chatId) {
+  return res.status(400).json({
+    error: 'chatId do Telegram não informado.'
+  })
+}
+      
       const render =
         renders.get(renderId)
 
@@ -1276,27 +1286,30 @@ app.post(
       // -------------------------------------------------------
 
       await sendTelegramFile({
-        method: 'sendPhoto',
-        filePath: imagePath,
-        fieldName: 'photo',
-        fileName: 'cover.jpg',
-        mimeType: 'image/jpeg',
-        caption: `🔥 ${safeTitle}`
-      })
+  method: 'sendPhoto',
+  filePath: imagePath,
+  fieldName: 'photo',
+  fileName: 'cover.jpg',
+  mimeType: 'image/jpeg',
+  chatId,
+  threadId,
+  caption: `🔥 ${safeTitle}`
+})
 
       // -------------------------------------------------------
       // 2. Envia o áudio separadamente
       // -------------------------------------------------------
 
       await sendTelegramFile({
-        method: 'sendAudio',
-        filePath: audioPath,
-        fieldName: 'audio',
-        fileName: `${safeTitle}.mp3`,
-        mimeType: 'audio/mpeg',
-        caption: ''
-      })
-
+  method: 'sendAudio',
+  filePath: audioPath,
+  fieldName: 'audio',
+  fileName: `${safeTitle}.mp3`,
+  mimeType: 'audio/mpeg',
+  chatId,
+  threadId,
+  caption: ''
+})
       console.log(
         `Telegram publicado: ${renderId}`
       )
