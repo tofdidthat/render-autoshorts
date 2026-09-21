@@ -104,6 +104,78 @@ setInterval(() => {
   }
 }, 60 * 1000).unref()
 
+async function sendTelegramFile({
+  method,
+  filePath,
+  fieldName,
+  fileName,
+  mimeType,
+  caption = ''
+}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  const threadId = process.env.TELEGRAM_NEW_BEATS_THREAD_ID
+
+  if (!botToken || !chatId || !threadId) {
+    throw new Error(
+      'Variáveis do Telegram não configuradas no Railway.'
+    )
+  }
+
+  const fileBuffer =
+    await fs.promises.readFile(filePath)
+
+  const formData = new FormData()
+
+  formData.append(
+    'chat_id',
+    String(chatId)
+  )
+
+  formData.append(
+    'message_thread_id',
+    String(threadId)
+  )
+
+  if (caption) {
+    formData.append(
+      'caption',
+      caption
+    )
+  }
+
+  formData.append(
+    fieldName,
+    new Blob(
+      [fileBuffer],
+      { type: mimeType }
+    ),
+    fileName
+  )
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${botToken}/${method}`,
+    {
+      method: 'POST',
+      body: formData
+    }
+  )
+
+  const data =
+    await response
+      .json()
+      .catch(() => ({}))
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(
+      data?.description ||
+      `Telegram respondeu HTTP ${response.status}`
+    )
+  }
+
+  return data
+}
+
 function validateTikTokUploadUrl(uploadUrl) {
   let parsed
 
@@ -1096,6 +1168,161 @@ app.post(
         details:
           error?.message
       })
+    }
+  }
+)
+
+// ============================================================
+// TELEGRAM
+// Envia imagem + áudio para o tópico NEW BEATS
+// ============================================================
+
+app.post(
+  '/publish-telegram',
+
+  async (req, res) => {
+    const {
+      renderId,
+      title
+    } = req.body || {}
+
+    let imagePath = null
+    let audioPath = null
+
+    try {
+      if (!renderId) {
+        return res.status(400).json({
+          error: 'renderId não informado.'
+        })
+      }
+
+      const render =
+        renders.get(renderId)
+
+      if (
+        !render ||
+        !fs.existsSync(render.path)
+      ) {
+        return res.status(404).json({
+          error:
+            'Render não encontrado ou expirado.'
+        })
+      }
+
+      imagePath = path.join(
+        os.tmpdir(),
+        `${renderId}-telegram.jpg`
+      )
+
+      audioPath = path.join(
+        os.tmpdir(),
+        `${renderId}-telegram.mp3`
+      )
+
+      // -------------------------------------------------------
+      // Extrai um frame do vídeo
+      // -------------------------------------------------------
+
+      try {
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+            '-ss', '1',
+            '-i', render.path,
+            '-frames:v', '1',
+            '-q:v', '2',
+            imagePath
+          ]
+        )
+      } catch {
+        // Alguns vídeos podem ter menos de 1 segundo.
+        // Nesse caso tenta o primeiro frame.
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+            '-i', render.path,
+            '-frames:v', '1',
+            '-q:v', '2',
+            imagePath
+          ]
+        )
+      }
+
+      // -------------------------------------------------------
+      // Extrai o áudio do vídeo
+      // -------------------------------------------------------
+
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-i', render.path,
+          '-vn',
+          '-c:a', 'libmp3lame',
+          '-b:a', '192k',
+          audioPath
+        ]
+      )
+
+      const safeTitle =
+        String(title || 'New Beat')
+          .trim()
+          .slice(0, 100)
+
+      // -------------------------------------------------------
+      // 1. Envia a imagem
+      // -------------------------------------------------------
+
+      await sendTelegramFile({
+        method: 'sendPhoto',
+        filePath: imagePath,
+        fieldName: 'photo',
+        fileName: 'cover.jpg',
+        mimeType: 'image/jpeg',
+        caption: `🔥 ${safeTitle}`
+      })
+
+      // -------------------------------------------------------
+      // 2. Envia o áudio separadamente
+      // -------------------------------------------------------
+
+      await sendTelegramFile({
+        method: 'sendAudio',
+        filePath: audioPath,
+        fieldName: 'audio',
+        fileName: `${safeTitle}.mp3`,
+        mimeType: 'audio/mpeg',
+        caption: ''
+      })
+
+      console.log(
+        `Telegram publicado: ${renderId}`
+      )
+
+      return res.json({
+        ok: true,
+        renderId
+      })
+
+    } catch (error) {
+      console.error(
+        'Erro Telegram:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Falha ao publicar no Telegram.',
+
+        details:
+          error?.message
+      })
+
+    } finally {
+      deleteFile(imagePath)
+      deleteFile(audioPath)
     }
   }
 )
