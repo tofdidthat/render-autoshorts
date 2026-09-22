@@ -2,10 +2,12 @@
   "name": "autoshorts-render",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {"start": "node server.js"},
-"dependencies": {
-  "express": "...",
-  "multer": "...",
-  "pg": "^8.16.3"
-}
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3"
+  }
 }
