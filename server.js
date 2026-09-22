@@ -1528,11 +1528,12 @@ app.post(
 
   async (req, res) => {
     const {
-      renderId,
-      title,
-      clientId
-    } = req.body || {}
-
+  renderId,
+  title,
+  description,
+  audioFileName,
+  clientId
+} = req.body || {}
     let imagePath = null
     let audioPath = null
 
@@ -1657,6 +1658,25 @@ app.post(
           .trim()
           .slice(0, 100)
 
+      const safeDescription =
+  String(description || '')
+    .trim()
+    .slice(0, 900)
+
+const originalAudioName =
+  String(
+    audioFileName ||
+    `${safeTitle}.mp3`
+  )
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\.[^.]+$/, '') + '.mp3'
+
+const telegramCaption =
+  safeDescription
+    ? `🔥 ${safeTitle}\n\n${safeDescription}`
+    : `🔥 ${safeTitle}`
+
       // -------------------------------------------------------
       // 1. Envia a imagem
       // -------------------------------------------------------
@@ -1669,7 +1689,7 @@ app.post(
         mimeType: 'image/jpeg',
         chatId,
         threadId,
-        caption: `🔥 ${safeTitle}`
+        caption: telegramCaption
       })
 
       // -------------------------------------------------------
@@ -1680,7 +1700,7 @@ app.post(
         method: 'sendAudio',
         filePath: audioPath,
         fieldName: 'audio',
-        fileName: `${safeTitle}.mp3`,
+       fileName: originalAudioName,
         mimeType: 'audio/mpeg',
         chatId,
         threadId,
