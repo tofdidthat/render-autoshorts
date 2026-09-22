@@ -1449,6 +1449,15 @@ async function setupDatabase() {
       )
     `)
 
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS telegram_connect_codes (
+        code TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ
+      )
+    `)
+
     console.log('Telegram database ready.')
   } catch (error) {
     console.error(
