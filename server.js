@@ -1,11 +1,18 @@
 import express from 'express'
 import multer from 'multer'
 import fs from 'fs'
+import pg from 'pg'
 import os from 'os'
 import path from 'path'
 import crypto from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+
+const { Pool } = pg
+
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL
+})
 
 const execFileAsync = promisify(execFile)
 
@@ -1427,6 +1434,31 @@ if (!chatId) {
     }
   }
 )
+
+async function setupDatabase() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS telegram_connections (
+        id SERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        chat_title TEXT,
+        thread_id TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(client_id, chat_id, thread_id)
+      )
+    `)
+
+    console.log('Telegram database ready.')
+  } catch (error) {
+    console.error(
+      'Error preparing Telegram database:',
+      error
+    )
+  }
+}
+
+setupDatabase()
 
 app.listen(
   port,
