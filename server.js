@@ -1797,6 +1797,171 @@ app.post('/discord/connect-code', async (req, res) => {
   }
 })
 
+// ============================================================
+// DISCORD INTERACTIONS
+// Recebe o comando /connect
+// ============================================================
+
+app.post('/discord/interactions', async (req, res) => {
+  try {
+    const interaction = req.body || {}
+
+    // Discord verifica o endpoint com um PING
+    if (interaction.type === 1) {
+      return res.json({
+        type: 1
+      })
+    }
+
+    // Slash command
+    if (
+      interaction.type === 2 &&
+      interaction.data?.name === 'connect'
+    ) {
+      const code =
+        String(
+          interaction.data?.options?.find(
+            option => option.name === 'code'
+          )?.value || ''
+        )
+          .trim()
+          .toUpperCase()
+
+      const guildId =
+        String(interaction.guild_id || '')
+
+      const channelId =
+        String(interaction.channel_id || '')
+
+      const guildName =
+        String(
+          interaction.guild?.name ||
+          'Discord'
+        )
+
+      const channelName =
+        String(
+          interaction.channel?.name ||
+          'Discord Channel'
+        )
+
+      if (!code) {
+        return res.json({
+          type: 4,
+          data: {
+            content:
+              '❌ Connection code missing.',
+            flags: 64
+          }
+        })
+      }
+
+      const codeResult =
+        await db.query(
+          `
+            SELECT
+              code,
+              client_id
+            FROM discord_connect_codes
+            WHERE code = $1
+              AND used_at IS NULL
+              AND expires_at > NOW()
+            LIMIT 1
+          `,
+          [code]
+        )
+
+      if (!codeResult.rows.length) {
+        return res.json({
+          type: 4,
+          data: {
+            content:
+              '❌ Invalid or expired connection code.',
+            flags: 64
+          }
+        })
+      }
+
+      const clientId =
+        codeResult.rows[0].client_id
+
+      await db.query(
+        `
+          INSERT INTO discord_connections (
+            client_id,
+            guild_id,
+            guild_name,
+            channel_id,
+            channel_name
+          )
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (
+            client_id,
+            guild_id,
+            channel_id
+          )
+          DO UPDATE SET
+            guild_name = EXCLUDED.guild_name,
+            channel_name = EXCLUDED.channel_name
+        `,
+        [
+          clientId,
+          guildId,
+          guildName,
+          channelId,
+          channelName
+        ]
+      )
+
+      await db.query(
+        `
+          UPDATE discord_connect_codes
+          SET used_at = NOW()
+          WHERE code = $1
+        `,
+        [code]
+      )
+
+      console.log(
+        'Discord conectado:',
+        {
+          clientId,
+          guildId,
+          channelId,
+          channelName
+        }
+      )
+
+      return res.json({
+        type: 4,
+        data: {
+          content:
+            '✅ Connected to 1CE!',
+          flags: 64
+        }
+      })
+    }
+
+    return res.json({
+      type: 4,
+      data: {
+        content: 'Unknown command.',
+        flags: 64
+      }
+    })
+
+  } catch (error) {
+    console.error(
+      'Discord interaction error:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Discord interaction error.'
+    })
+  }
+})
 
 // ============================================================
 // DISCORD
