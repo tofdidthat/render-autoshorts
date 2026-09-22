@@ -1242,9 +1242,60 @@ app.post('/telegram/connect-code', async (req, res) => {
   }
 })
 
+async function sendTelegramMessage(
+  chatId,
+  threadId,
+  text
+) {
+  const botToken =
+    process.env.TELEGRAM_BOT_TOKEN
+
+  if (!botToken || !chatId) {
+    return
+  }
+
+  const response =
+    await fetch(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: 'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json'
+        },
+
+        body: JSON.stringify({
+          chat_id: chatId,
+
+          ...(threadId
+            ? {
+                message_thread_id:
+                  threadId
+              }
+            : {}),
+
+          text
+        })
+      }
+    )
+
+  const data =
+    await response
+      .json()
+      .catch(() => ({}))
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(
+      data?.description ||
+      'Telegram message failed.'
+    )
+  }
+}
+
 // ============================================================
 // TELEGRAM WEBHOOK
-// Detecta grupo e tópico onde o bot recebeu /connect
+// Conecta grupo/tópico ao usuário da 1CE
 // ============================================================
 
 app.post('/telegram/webhook', async (req, res) => {
@@ -1262,10 +1313,17 @@ app.post('/telegram/webhook', async (req, res) => {
     const text =
       String(message.text || '').trim()
 
-    // Só processa o comando /connect
     if (!text.startsWith('/connect')) {
       return res.json({ ok: true })
     }
+
+    const parts =
+      text.split(/\s+/)
+
+    const code =
+      String(parts[1] || '')
+        .trim()
+        .toUpperCase()
 
     const chatId =
       message.chat?.id
@@ -1278,37 +1336,98 @@ app.post('/telegram/webhook', async (req, res) => {
     const threadId =
       message.message_thread_id || null
 
+    if (!code) {
+      await sendTelegramMessage(
+        chatId,
+        threadId,
+        '❌ Connection code missing. Use /connect CODE'
+      )
+
+      return res.json({ ok: true })
+    }
+
     if (!chatId) {
       return res.json({ ok: true })
     }
 
-    console.log('Telegram conectado:', {
-      chatId,
-      chatTitle,
-      threadId
-    })
+    const codeResult =
+      await db.query(
+        `
+          SELECT
+            code,
+            client_id
+          FROM telegram_connect_codes
+          WHERE code = $1
+            AND used_at IS NULL
+            AND expires_at > NOW()
+          LIMIT 1
+        `,
+        [code]
+      )
 
-    await fetch(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    if (!codeResult.rows.length) {
+      await sendTelegramMessage(
+        chatId,
+        threadId,
+        '❌ Invalid or expired connection code.'
+      )
+
+      return res.json({ ok: true })
+    }
+
+    const clientId =
+      codeResult.rows[0].client_id
+
+    await db.query(
+      `
+        INSERT INTO telegram_connections (
+          client_id,
+          chat_id,
+          chat_title,
+          thread_id
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (
+          client_id,
+          chat_id,
+          thread_id
+        )
+        DO UPDATE SET
+          chat_title = EXCLUDED.chat_title
+      `,
+      [
+        clientId,
+        String(chatId),
+        String(chatTitle),
+        threadId
+          ? String(threadId)
+          : null
+      ]
+    )
+
+    await db.query(
+      `
+        UPDATE telegram_connect_codes
+        SET used_at = NOW()
+        WHERE code = $1
+      `,
+      [code]
+    )
+
+    console.log(
+      'Telegram conectado:',
       {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          chat_id: chatId,
-
-          ...(threadId
-            ? {
-                message_thread_id:
-                  threadId
-              }
-            : {}),
-
-          text:
-            '✅ Connected to 1CE!'
-        })
+        clientId,
+        chatId,
+        chatTitle,
+        threadId
       }
+    )
+
+    await sendTelegramMessage(
+      chatId,
+      threadId,
+      '✅ Connected to 1CE!'
     )
 
     return res.json({
@@ -1329,7 +1448,6 @@ app.post('/telegram/webhook', async (req, res) => {
       })
   }
 })
-
 // ============================================================
 // TELEGRAM
 // Envia imagem + áudio para o tópico NEW BEATS
