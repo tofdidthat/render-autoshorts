@@ -1294,6 +1294,76 @@ async function sendTelegramMessage(
 }
 
 // ============================================================
+// TELEGRAM CONNECTION STATUS
+// Verifica se este navegador já conectou um Telegram
+// ============================================================
+
+app.get('/telegram/connect-status', async (req, res) => {
+  try {
+    const clientId =
+      String(req.query.clientId || '').trim()
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'clientId não informado.'
+      })
+    }
+
+    const result =
+      await db.query(
+        `
+          SELECT
+            chat_title,
+            thread_id,
+            created_at
+          FROM telegram_connections
+          WHERE client_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [clientId]
+      )
+
+    if (!result.rows.length) {
+      return res.json({
+        ok: true,
+        connected: false
+      })
+    }
+
+    const connection =
+      result.rows[0]
+
+    return res.json({
+      ok: true,
+      connected: true,
+
+      connection: {
+        chatTitle:
+          connection.chat_title,
+
+        threadId:
+          connection.thread_id,
+
+        connectedAt:
+          connection.created_at
+      }
+    })
+
+  } catch (error) {
+    console.error(
+      'Telegram connection status error:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Unable to check Telegram connection.'
+    })
+  }
+})
+
+// ============================================================
 // TELEGRAM WEBHOOK
 // Conecta grupo/tópico ao usuário da 1CE
 // ============================================================
