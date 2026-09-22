@@ -1528,11 +1528,10 @@ app.post(
 
   async (req, res) => {
     const {
-  renderId,
-  title,
-  chatId,
-  threadId
-} = req.body || {}
+      renderId,
+      title,
+      clientId
+    } = req.body || {}
 
     let imagePath = null
     let audioPath = null
@@ -1544,12 +1543,47 @@ app.post(
         })
       }
 
-if (!chatId) {
-  return res.status(400).json({
-    error: 'chatId do Telegram não informado.'
-  })
-}
-      
+      if (!clientId) {
+        return res.status(400).json({
+          error: 'clientId não informado.'
+        })
+      }
+
+      // -------------------------------------------------------
+      // Busca o Telegram conectado a este usuário
+      // -------------------------------------------------------
+
+      const connectionResult =
+        await db.query(
+          `
+            SELECT
+              chat_id,
+              thread_id,
+              chat_title
+            FROM telegram_connections
+            WHERE client_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+          `,
+          [String(clientId)]
+        )
+
+      if (!connectionResult.rows.length) {
+        return res.status(404).json({
+          error:
+            'Telegram não conectado.'
+        })
+      }
+
+      const connection =
+        connectionResult.rows[0]
+
+      const chatId =
+        connection.chat_id
+
+      const threadId =
+        connection.thread_id || null
+
       const render =
         renders.get(renderId)
 
@@ -1590,8 +1624,6 @@ if (!chatId) {
           ]
         )
       } catch {
-        // Alguns vídeos podem ter menos de 1 segundo.
-        // Nesse caso tenta o primeiro frame.
         await execFileAsync(
           'ffmpeg',
           [
@@ -1630,32 +1662,33 @@ if (!chatId) {
       // -------------------------------------------------------
 
       await sendTelegramFile({
-  method: 'sendPhoto',
-  filePath: imagePath,
-  fieldName: 'photo',
-  fileName: 'cover.jpg',
-  mimeType: 'image/jpeg',
-  chatId,
-  threadId,
-  caption: `🔥 ${safeTitle}`
-})
+        method: 'sendPhoto',
+        filePath: imagePath,
+        fieldName: 'photo',
+        fileName: 'cover.jpg',
+        mimeType: 'image/jpeg',
+        chatId,
+        threadId,
+        caption: `🔥 ${safeTitle}`
+      })
 
       // -------------------------------------------------------
-      // 2. Envia o áudio separadamente
+      // 2. Envia o áudio
       // -------------------------------------------------------
 
       await sendTelegramFile({
-  method: 'sendAudio',
-  filePath: audioPath,
-  fieldName: 'audio',
-  fileName: `${safeTitle}.mp3`,
-  mimeType: 'audio/mpeg',
-  chatId,
-  threadId,
-  caption: ''
-})
+        method: 'sendAudio',
+        filePath: audioPath,
+        fieldName: 'audio',
+        fileName: `${safeTitle}.mp3`,
+        mimeType: 'audio/mpeg',
+        chatId,
+        threadId,
+        caption: ''
+      })
+
       console.log(
-        `Telegram publicado: ${renderId}`
+        `Telegram publicado: ${renderId} -> ${connection.chat_title}`
       )
 
       return res.json({
