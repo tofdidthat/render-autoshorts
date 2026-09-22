@@ -1182,6 +1182,67 @@ app.post(
 )
 
 // ============================================================
+// TELEGRAM CONNECT
+// Gera código temporário para conectar um chat
+// ============================================================
+
+app.post('/telegram/connect-code', async (req, res) => {
+  try {
+    const {
+      clientId
+    } = req.body || {}
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'clientId não informado.'
+      })
+    }
+
+    const code =
+      crypto
+        .randomBytes(4)
+        .toString('hex')
+        .toUpperCase()
+
+    await db.query(
+      `
+        INSERT INTO telegram_connect_codes (
+          code,
+          client_id,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          NOW() + INTERVAL '10 minutes'
+        )
+      `,
+      [
+        code,
+        String(clientId)
+      ]
+    )
+
+    return res.json({
+      ok: true,
+      code,
+      botUsername: 'oncetelegrambot'
+    })
+
+  } catch (error) {
+    console.error(
+      'Telegram connect code error:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Unable to create Telegram connection code.'
+    })
+  }
+})
+
+// ============================================================
 // TELEGRAM WEBHOOK
 // Detecta grupo e tópico onde o bot recebeu /connect
 // ============================================================
