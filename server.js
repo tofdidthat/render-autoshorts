@@ -1738,6 +1738,67 @@ const telegramCaption =
 )
 
 // ============================================================
+// DISCORD CONNECT
+// Gera código temporário para conectar um canal
+// ============================================================
+
+app.post('/discord/connect-code', async (req, res) => {
+  try {
+    const {
+      clientId
+    } = req.body || {}
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'clientId não informado.'
+      })
+    }
+
+    const code =
+      crypto
+        .randomBytes(4)
+        .toString('hex')
+        .toUpperCase()
+
+    await db.query(
+      `
+        INSERT INTO discord_connect_codes (
+          code,
+          client_id,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          NOW() + INTERVAL '10 minutes'
+        )
+      `,
+      [
+        code,
+        String(clientId)
+      ]
+    )
+
+    return res.json({
+      ok: true,
+      code
+    })
+
+  } catch (error) {
+    console.error(
+      'Discord connect code error:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Unable to create Discord connection code.'
+    })
+  }
+})
+
+
+// ============================================================
 // DISCORD
 // Registra o comando /connect no servidor de teste
 // ============================================================
@@ -1846,7 +1907,29 @@ async function setupDatabase() {
       )
     `)
 
-    console.log('Telegram database ready.')
+await db.query(`
+  CREATE TABLE IF NOT EXISTS discord_connections (
+    id SERIAL PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    guild_name TEXT,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(client_id, guild_id, channel_id)
+  )
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS discord_connect_codes (
+    code TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+  )
+`)
+    
+  console.log('Telegram + Discord database ready.')
   } catch (error) {
     console.error(
       'Error preparing Telegram database:',
