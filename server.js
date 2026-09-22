@@ -1175,6 +1175,94 @@ app.post(
 )
 
 // ============================================================
+// TELEGRAM WEBHOOK
+// Detecta grupo e tópico onde o bot recebeu /connect
+// ============================================================
+
+app.post('/telegram/webhook', async (req, res) => {
+  try {
+    const update = req.body || {}
+
+    const message =
+      update.message ||
+      update.channel_post
+
+    if (!message) {
+      return res.json({ ok: true })
+    }
+
+    const text =
+      String(message.text || '').trim()
+
+    // Só processa o comando /connect
+    if (!text.startsWith('/connect')) {
+      return res.json({ ok: true })
+    }
+
+    const chatId =
+      message.chat?.id
+
+    const chatTitle =
+      message.chat?.title ||
+      message.chat?.username ||
+      'Telegram'
+
+    const threadId =
+      message.message_thread_id || null
+
+    if (!chatId) {
+      return res.json({ ok: true })
+    }
+
+    console.log('Telegram conectado:', {
+      chatId,
+      chatTitle,
+      threadId
+    })
+
+    await fetch(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+
+          ...(threadId
+            ? {
+                message_thread_id:
+                  threadId
+              }
+            : {}),
+
+          text:
+            '✅ Connected to 1CE!'
+        })
+      }
+    )
+
+    return res.json({
+      ok: true
+    })
+
+  } catch (error) {
+    console.error(
+      'Telegram webhook error:',
+      error
+    )
+
+    return res
+      .status(500)
+      .json({
+        error:
+          'Telegram webhook error.'
+      })
+  }
+})
+
+// ============================================================
 // TELEGRAM
 // Envia imagem + áudio para o tópico NEW BEATS
 // ============================================================
