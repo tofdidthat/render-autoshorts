@@ -24,7 +24,16 @@ const RENDER_TTL_MS = 10 * 60 * 1000
 const renders = new Map()
 
 app.use(express.json({
-  limit: '1mb'
+  limit: '1mb',
+
+  verify: (req, res, buf) => {
+    if (
+      req.originalUrl ===
+      '/discord/interactions'
+    ) {
+      req.rawBody = buf
+    }
+  }
 }))
 
 // CORS
@@ -1797,6 +1806,66 @@ app.post('/discord/connect-code', async (req, res) => {
   }
 })
 
+function verifyDiscordRequest(req) {
+  try {
+    const signature =
+      req.headers['x-signature-ed25519']
+
+    const timestamp =
+      req.headers['x-signature-timestamp']
+
+    const publicKey =
+      process.env.DISCORD_PUBLIC_KEY
+
+    if (
+      !signature ||
+      !timestamp ||
+      !publicKey ||
+      !req.rawBody
+    ) {
+      return false
+    }
+
+    const message =
+      Buffer.concat([
+        Buffer.from(timestamp),
+        req.rawBody
+      ])
+
+    const publicKeyDer =
+      Buffer.concat([
+        Buffer.from(
+          '302a300506032b6570032100',
+          'hex'
+        ),
+
+        Buffer.from(
+          publicKey,
+          'hex'
+        )
+      ])
+
+    return crypto.verify(
+      null,
+      message,
+      {
+        key: publicKeyDer,
+        format: 'der',
+        type: 'spki'
+      },
+      Buffer.from(signature, 'hex')
+    )
+
+  } catch (error) {
+    console.error(
+      'Discord signature verification error:',
+      error
+    )
+
+    return false
+  }
+}
+
 // ============================================================
 // DISCORD INTERACTIONS
 // Recebe o comando /connect
@@ -1804,6 +1873,12 @@ app.post('/discord/connect-code', async (req, res) => {
 
 app.post('/discord/interactions', async (req, res) => {
   try {
+
+    if (!verifyDiscordRequest(req)) {
+  return res
+    .status(401)
+    .send('Invalid request signature')
+}
     const interaction = req.body || {}
 
     // Discord verifica o endpoint com um PING
