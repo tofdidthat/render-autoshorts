@@ -1806,6 +1806,84 @@ app.post('/discord/connect-code', async (req, res) => {
   }
 })
 
+// ============================================================
+// DISCORD CONNECTION STATUS
+// Verifica se este navegador já conectou um Discord
+// ============================================================
+
+app.get('/discord/connect-status', async (req, res) => {
+  try {
+    const clientId =
+      String(req.query.clientId || '').trim()
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'clientId não informado.'
+      })
+    }
+
+    const result =
+      await db.query(
+        `
+          SELECT
+            guild_id,
+            guild_name,
+            channel_id,
+            channel_name,
+            created_at
+          FROM discord_connections
+          WHERE client_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [clientId]
+      )
+
+    if (!result.rows.length) {
+      return res.json({
+        ok: true,
+        connected: false
+      })
+    }
+
+    const connection =
+      result.rows[0]
+
+    return res.json({
+      ok: true,
+      connected: true,
+
+      connection: {
+        guildId:
+          connection.guild_id,
+
+        guildName:
+          connection.guild_name,
+
+        channelId:
+          connection.channel_id,
+
+        channelName:
+          connection.channel_name,
+
+        connectedAt:
+          connection.created_at
+      }
+    })
+
+  } catch (error) {
+    console.error(
+      'Discord connection status error:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Unable to check Discord connection.'
+    })
+  }
+})
+
 function verifyDiscordRequest(req) {
   try {
     const signature =
