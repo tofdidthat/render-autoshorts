@@ -2117,6 +2117,308 @@ app.post('/discord/interactions', async (req, res) => {
 })
 
 // ============================================================
+// DISCORD PUBLISH
+// Envia capa + título/descrição + áudio
+// ============================================================
+
+app.post('/publish-discord', async (req, res) => {
+  const {
+    renderId,
+    title,
+    description,
+    audioFileName,
+    clientId
+  } = req.body || {}
+
+  let imagePath = null
+  let audioPath = null
+
+  try {
+    if (!renderId) {
+      return res.status(400).json({
+        error: 'renderId não informado.'
+      })
+    }
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'clientId não informado.'
+      })
+    }
+
+    const botToken =
+      process.env.DISCORD_BOT_TOKEN
+
+    if (!botToken) {
+      return res.status(500).json({
+        error:
+          'Discord bot não configurado.'
+      })
+    }
+
+    // -------------------------------------------------------
+    // Busca o canal Discord conectado
+    // -------------------------------------------------------
+
+    const connectionResult =
+      await db.query(
+        `
+          SELECT
+            guild_id,
+            channel_id,
+            channel_name
+          FROM discord_connections
+          WHERE client_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [String(clientId)]
+      )
+
+    if (!connectionResult.rows.length) {
+      return res.status(404).json({
+        error:
+          'Discord não conectado.'
+      })
+    }
+
+    const connection =
+      connectionResult.rows[0]
+
+    const channelId =
+      connection.channel_id
+
+    const render =
+      renders.get(renderId)
+
+    if (
+      !render ||
+      !fs.existsSync(render.path)
+    ) {
+      return res.status(404).json({
+        error:
+          'Render não encontrado ou expirado.'
+      })
+    }
+
+    imagePath = path.join(
+      os.tmpdir(),
+      `${renderId}-discord.jpg`
+    )
+
+    audioPath = path.join(
+      os.tmpdir(),
+      `${renderId}-discord.mp3`
+    )
+
+    // -------------------------------------------------------
+    // Extrai a capa do vídeo
+    // -------------------------------------------------------
+
+    try {
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-ss', '1',
+          '-i', render.path,
+          '-frames:v', '1',
+          '-q:v', '2',
+          imagePath
+        ]
+      )
+    } catch {
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-i', render.path,
+          '-frames:v', '1',
+          '-q:v', '2',
+          imagePath
+        ]
+      )
+    }
+
+    // -------------------------------------------------------
+    // Extrai MP3
+    // -------------------------------------------------------
+
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-i', render.path,
+        '-vn',
+        '-c:a', 'libmp3lame',
+        '-b:a', '192k',
+        audioPath
+      ]
+    )
+
+    const safeTitle =
+      String(title || 'New Beat')
+        .trim()
+        .slice(0, 100)
+
+    const safeDescription =
+      String(description || '')
+        .trim()
+        .slice(0, 1800)
+
+    const originalAudioName =
+      String(
+        audioFileName ||
+        `${safeTitle}.mp3`
+      )
+        .trim()
+        .replace(/[\\/:*?"<>|]/g, '-')
+        .replace(/\.[^.]+$/, '') +
+      '.mp3'
+
+    const discordMessage =
+      safeDescription
+        ? `🔥 ${safeTitle}\n\n${safeDescription}`
+        : `🔥 ${safeTitle}`
+
+    // -------------------------------------------------------
+    // 1. Envia capa + título + descrição
+    // -------------------------------------------------------
+
+    const imageBuffer =
+      await fs.promises.readFile(
+        imagePath
+      )
+
+    const imageForm =
+      new FormData()
+
+    imageForm.append(
+      'payload_json',
+      JSON.stringify({
+        content: discordMessage
+      })
+    )
+
+    imageForm.append(
+      'files[0]',
+      new Blob(
+        [imageBuffer],
+        {
+          type: 'image/jpeg'
+        }
+      ),
+      'cover.jpg'
+    )
+
+    const imageResponse =
+      await fetch(
+        `https://discord.com/api/v10/channels/${channelId}/messages`,
+        {
+          method: 'POST',
+
+          headers: {
+            Authorization:
+              `Bot ${botToken}`
+          },
+
+          body: imageForm
+        }
+      )
+
+    const imageData =
+      await imageResponse
+        .json()
+        .catch(() => ({}))
+
+    if (!imageResponse.ok) {
+      throw new Error(
+        imageData?.message ||
+        `Discord respondeu HTTP ${imageResponse.status}`
+      )
+    }
+
+    // -------------------------------------------------------
+    // 2. Envia o MP3 com o nome original
+    // -------------------------------------------------------
+
+    const audioBuffer =
+      await fs.promises.readFile(
+        audioPath
+      )
+
+    const audioForm =
+      new FormData()
+
+    audioForm.append(
+      'files[0]',
+      new Blob(
+        [audioBuffer],
+        {
+          type: 'audio/mpeg'
+        }
+      ),
+      originalAudioName
+    )
+
+    const audioResponse =
+      await fetch(
+        `https://discord.com/api/v10/channels/${channelId}/messages`,
+        {
+          method: 'POST',
+
+          headers: {
+            Authorization:
+              `Bot ${botToken}`
+          },
+
+          body: audioForm
+        }
+      )
+
+    const audioData =
+      await audioResponse
+        .json()
+        .catch(() => ({}))
+
+    if (!audioResponse.ok) {
+      throw new Error(
+        audioData?.message ||
+        `Discord respondeu HTTP ${audioResponse.status}`
+      )
+    }
+
+    console.log(
+      `Discord publicado: ${renderId} -> ${connection.channel_name}`
+    )
+
+    return res.json({
+      ok: true,
+      renderId
+    })
+
+  } catch (error) {
+    console.error(
+      'Erro Discord:',
+      error
+    )
+
+    return res.status(500).json({
+      error:
+        'Falha ao publicar no Discord.',
+
+      details:
+        error?.message
+    })
+
+  } finally {
+    deleteFile(imagePath)
+    deleteFile(audioPath)
+  }
+})
+
+
+// ============================================================
 // DISCORD
 // Registra o comando /connect no servidor de teste
 // ============================================================
