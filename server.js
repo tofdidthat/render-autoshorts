@@ -2281,112 +2281,89 @@ app.post('/publish-discord', async (req, res) => {
         ? `🔥 ${safeTitle}\n\n${safeDescription}`
         : `🔥 ${safeTitle}`
 
-    // -------------------------------------------------------
-    // 1. Envia capa + título + descrição
-    // -------------------------------------------------------
+   // -------------------------------------------------------
+// Envia capa + áudio na MESMA mensagem
+// -------------------------------------------------------
 
-    const imageBuffer =
-      await fs.promises.readFile(
-        imagePath
-      )
+const imageBuffer =
+  await fs.promises.readFile(
+    imagePath
+  )
 
-    const imageForm =
-      new FormData()
+const audioBuffer =
+  await fs.promises.readFile(
+    audioPath
+  )
 
-    imageForm.append(
-      'payload_json',
-      JSON.stringify({
-        content: discordMessage
-      })
-    )
+const discordForm =
+  new FormData()
 
-    imageForm.append(
-      'files[0]',
-      new Blob(
-        [imageBuffer],
-        {
-          type: 'image/jpeg'
-        }
-      ),
-      'cover.jpg'
-    )
+discordForm.append(
+  'payload_json',
+  JSON.stringify({
+    content: discordMessage,
 
-    const imageResponse =
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages`,
-        {
-          method: 'POST',
+    attachments: [
+      {
+        id: 0,
+        filename: 'cover.jpg'
+      },
+      {
+        id: 1,
+        filename: originalAudioName
+      }
+    ]
+  })
+)
 
-          headers: {
-            Authorization:
-              `Bot ${botToken}`
-          },
-
-          body: imageForm
-        }
-      )
-
-    const imageData =
-      await imageResponse
-        .json()
-        .catch(() => ({}))
-
-    if (!imageResponse.ok) {
-      throw new Error(
-        imageData?.message ||
-        `Discord respondeu HTTP ${imageResponse.status}`
-      )
+discordForm.append(
+  'files[0]',
+  new Blob(
+    [imageBuffer],
+    {
+      type: 'image/jpeg'
     }
+  ),
+  'cover.jpg'
+)
 
-    // -------------------------------------------------------
-    // 2. Envia o MP3 com o nome original
-    // -------------------------------------------------------
-
-    const audioBuffer =
-      await fs.promises.readFile(
-        audioPath
-      )
-
-    const audioForm =
-      new FormData()
-
-    audioForm.append(
-      'files[0]',
-      new Blob(
-        [audioBuffer],
-        {
-          type: 'audio/mpeg'
-        }
-      ),
-      originalAudioName
-    )
-
-    const audioResponse =
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages`,
-        {
-          method: 'POST',
-
-          headers: {
-            Authorization:
-              `Bot ${botToken}`
-          },
-
-          body: audioForm
-        }
-      )
-
-    const audioData =
-      await audioResponse
-        .json()
-        .catch(() => ({}))
-
-    if (!audioResponse.ok) {
-      throw new Error(
-        audioData?.message ||
-        `Discord respondeu HTTP ${audioResponse.status}`
-      )
+discordForm.append(
+  'files[1]',
+  new Blob(
+    [audioBuffer],
+    {
+      type: 'audio/mpeg'
     }
+  ),
+  originalAudioName
+)
+
+const discordResponse =
+  await fetch(
+    `https://discord.com/api/v10/channels/${channelId}/messages`,
+    {
+      method: 'POST',
+
+      headers: {
+        Authorization:
+          `Bot ${botToken}`
+      },
+
+      body: discordForm
+    }
+  )
+
+const discordData =
+  await discordResponse
+    .json()
+    .catch(() => ({}))
+
+if (!discordResponse.ok) {
+  throw new Error(
+    discordData?.message ||
+    `Discord respondeu HTTP ${discordResponse.status}`
+  )
+}
 
     console.log(
       `Discord publicado: ${renderId} -> ${connection.channel_name}`
