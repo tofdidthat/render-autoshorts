@@ -49,9 +49,9 @@ app.use((req, res, next) => {
   )
 
   res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type'
-  )
+  'Access-Control-Allow-Headers',
+  'Content-Type, Authorization'
+)
 
   res.setHeader(
     'Access-Control-Expose-Headers',
@@ -2481,8 +2481,464 @@ async function registerDiscordCommands() {
   }
 }
 
+// ============================================================
+// 1CE ACCOUNT AUTH - GOOGLE
+// Login principal da conta 1CE
+// Separado das conexões YouTube / TikTok / Instagram
+// ============================================================
+
+const ONECE_FRONTEND_URL =
+  process.env.ONECE_FRONTEND_URL ||
+  'https://1ce.app'
+
+function createAccountSessionToken() {
+  return crypto.randomBytes(32).toString('hex')
+}
+
+function hashAccountSessionToken(token) {
+  return crypto
+    .createHash('sha256')
+    .update(token)
+    .digest('hex')
+}
+
+async function getAccountFromRequest(req) {
+  const authorization =
+    req.headers.authorization || ''
+
+  if (!authorization.startsWith('Bearer ')) {
+    return null
+  }
+
+  const token =
+    authorization.slice(7).trim()
+
+  if (!token) {
+    return null
+  }
+
+  const tokenHash =
+    hashAccountSessionToken(token)
+
+  const result = await db.query(
+    `
+      SELECT
+        u.id,
+        u.google_id,
+        u.email,
+        u.name,
+        u.picture
+      FROM account_sessions s
+      JOIN account_users u
+        ON u.id = s.user_id
+      WHERE
+        s.token_hash = $1
+        AND s.expires_at > NOW()
+      LIMIT 1
+    `,
+    [tokenHash]
+  )
+
+  return result.rows[0] || null
+}
+
+
+// ------------------------------------------------------------
+// INICIA LOGIN GOOGLE
+// ------------------------------------------------------------
+
+app.get(
+  '/account/google',
+  (req, res) => {
+    const clientId =
+      process.env.GOOGLE_ACCOUNT_CLIENT_ID
+
+    const backendUrl =
+      process.env.BACKEND_PUBLIC_URL
+
+    if (!clientId || !backendUrl) {
+      return res.status(500).json({
+        error:
+          'Google Account Login não configurado.'
+      })
+    }
+
+    const state =
+      crypto.randomBytes(24).toString('hex')
+
+    const params =
+      new URLSearchParams({
+        client_id: clientId,
+
+        redirect_uri:
+          `${backendUrl}/account/google/callback`,
+
+        response_type: 'code',
+
+        scope:
+          'openid email profile',
+
+        state,
+
+        access_type: 'online',
+
+        prompt: 'select_account'
+      })
+
+    res.redirect(
+      `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+    )
+  }
+)
+
+
+// ------------------------------------------------------------
+// CALLBACK GOOGLE
+// ------------------------------------------------------------
+
+app.get(
+  '/account/google/callback',
+
+  async (req, res) => {
+    try {
+      const code =
+        String(req.query.code || '')
+
+      if (!code) {
+        return res.redirect(
+          `${ONECE_FRONTEND_URL}/app?login=error`
+        )
+      }
+
+      const clientId =
+        process.env.GOOGLE_ACCOUNT_CLIENT_ID
+
+      const clientSecret =
+        process.env.GOOGLE_ACCOUNT_CLIENT_SECRET
+
+      const backendUrl =
+        process.env.BACKEND_PUBLIC_URL
+
+      if (
+        !clientId ||
+        !clientSecret ||
+        !backendUrl
+      ) {
+        throw new Error(
+          'Variáveis do Google Account Login ausentes.'
+        )
+      }
+
+      // Troca authorization code por tokens
+      const tokenResponse =
+        await fetch(
+          'https://oauth2.googleapis.com/token',
+          {
+            method: 'POST',
+
+            headers: {
+              'Content-Type':
+                'application/x-www-form-urlencoded'
+            },
+
+            body:
+              new URLSearchParams({
+                code,
+
+                client_id:
+                  clientId,
+
+                client_secret:
+                  clientSecret,
+
+                redirect_uri:
+                  `${backendUrl}/account/google/callback`,
+
+                grant_type:
+                  'authorization_code'
+              })
+          }
+        )
+
+      const tokenData =
+        await tokenResponse
+          .json()
+          .catch(() => ({}))
+
+      if (
+        !tokenResponse.ok ||
+        !tokenData.access_token
+      ) {
+        console.error(
+          'Google token error:',
+          tokenData
+        )
+
+        throw new Error(
+          'Falha ao obter token do Google.'
+        )
+      }
+
+      // Busca perfil básico da conta
+      const userResponse =
+        await fetch(
+          'https://openidconnect.googleapis.com/v1/userinfo',
+          {
+            headers: {
+              Authorization:
+                `Bearer ${tokenData.access_token}`
+            }
+          }
+        )
+
+      const googleUser =
+        await userResponse
+          .json()
+          .catch(() => ({}))
+
+      if (
+        !userResponse.ok ||
+        !googleUser.sub ||
+        !googleUser.email
+      ) {
+        console.error(
+          'Google userinfo error:',
+          googleUser
+        )
+
+        throw new Error(
+          'Não foi possível obter a conta Google.'
+        )
+      }
+
+      // Cria ou atualiza usuário 1CE
+      const userResult =
+        await db.query(
+          `
+            INSERT INTO account_users (
+              google_id,
+              email,
+              name,
+              picture,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, NOW())
+
+            ON CONFLICT (google_id)
+            DO UPDATE SET
+              email = EXCLUDED.email,
+              name = EXCLUDED.name,
+              picture = EXCLUDED.picture,
+              updated_at = NOW()
+
+            RETURNING id
+          `,
+          [
+            googleUser.sub,
+            googleUser.email,
+            googleUser.name || '',
+            googleUser.picture || ''
+          ]
+        )
+
+      const userId =
+        userResult.rows[0].id
+
+      // Cria sessão própria da 1CE
+      const sessionToken =
+        createAccountSessionToken()
+
+      const tokenHash =
+        hashAccountSessionToken(
+          sessionToken
+        )
+
+      await db.query(
+        `
+          INSERT INTO account_sessions (
+            user_id,
+            token_hash,
+            expires_at
+          )
+          VALUES (
+            $1,
+            $2,
+            NOW() + INTERVAL '30 days'
+          )
+        `,
+        [
+          userId,
+          tokenHash
+        ]
+      )
+
+      // Token vai no fragmento (#), não na query string.
+      // O fragmento não é enviado ao servidor da Vercel.
+      res.redirect(
+        `${ONECE_FRONTEND_URL}/app#session=${encodeURIComponent(sessionToken)}`
+      )
+
+    } catch (error) {
+      console.error(
+        '1CE Google login error:',
+        error
+      )
+
+      res.redirect(
+        `${ONECE_FRONTEND_URL}/app?login=error`
+      )
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// USUÁRIO LOGADO
+// ------------------------------------------------------------
+
+app.get(
+  '/account/me',
+
+  async (req, res) => {
+    try {
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res
+          .status(401)
+          .json({
+            authenticated: false
+          })
+      }
+
+      res.json({
+        authenticated: true,
+
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          picture: user.picture
+        }
+      })
+
+    } catch (error) {
+      console.error(
+        'Account me error:',
+        error
+      )
+
+      res.status(500).json({
+        error:
+          'Falha ao verificar conta.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// LOGOUT
+// ------------------------------------------------------------
+
+app.post(
+  '/account/logout',
+
+  async (req, res) => {
+    try {
+      const authorization =
+        req.headers.authorization || ''
+
+      if (
+        authorization.startsWith(
+          'Bearer '
+        )
+      ) {
+        const token =
+          authorization
+            .slice(7)
+            .trim()
+
+        if (token) {
+          const tokenHash =
+            hashAccountSessionToken(
+              token
+            )
+
+          await db.query(
+            `
+              DELETE FROM account_sessions
+              WHERE token_hash = $1
+            `,
+            [tokenHash]
+          )
+        }
+      }
+
+      res.json({
+        ok: true
+      })
+
+    } catch (error) {
+      console.error(
+        'Account logout error:',
+        error
+      )
+
+      res.status(500).json({
+        error:
+          'Falha ao encerrar sessão.'
+      })
+    }
+  }
+)
+
 async function setupDatabase() {
   try {
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_users (
+    id SERIAL PRIMARY KEY,
+    google_id TEXT UNIQUE NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT,
+    picture TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_sessions (
+    id SERIAL PRIMARY KEY,
+
+    user_id INTEGER NOT NULL
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+
+    token_hash TEXT UNIQUE NOT NULL,
+
+    created_at TIMESTAMPTZ
+      DEFAULT NOW(),
+
+    expires_at TIMESTAMPTZ
+      NOT NULL
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    account_sessions_user_id_idx
+  ON account_sessions(user_id)
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    account_sessions_expires_at_idx
+  ON account_sessions(expires_at)
+`)
+
+    
     await db.query(`
       CREATE TABLE IF NOT EXISTS telegram_connections (
         id SERIAL PRIMARY KEY,
