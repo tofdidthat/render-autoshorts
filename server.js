@@ -2927,6 +2927,33 @@ await db.query(`
 `)
 
 await db.query(`
+  CREATE TABLE IF NOT EXISTS youtube_connections (
+    id SERIAL PRIMARY KEY,
+
+    user_id INTEGER NOT NULL UNIQUE
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+
+    scope TEXT,
+    token_type TEXT DEFAULT 'Bearer',
+
+    expires_at BIGINT,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    youtube_connections_user_id_idx
+  ON youtube_connections(user_id)
+`)
+    
+await db.query(`
   CREATE INDEX IF NOT EXISTS
     account_sessions_user_id_idx
   ON account_sessions(user_id)
