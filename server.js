@@ -2894,6 +2894,381 @@ app.post(
   }
 )
 
+// ============================================================
+// 1CE - YOUTUBE CONNECTION STORAGE
+// Comunicação privada Vercel <-> Railway
+// ============================================================
+
+function isValidInternalRequest(req) {
+  const secret =
+    req.headers['x-1ce-internal-secret']
+
+  const expected =
+    process.env.ONECE_INTERNAL_SECRET
+
+  if (!secret || !expected) {
+    return false
+  }
+
+  const left =
+    Buffer.from(String(secret))
+
+  const right =
+    Buffer.from(String(expected))
+
+  if (left.length !== right.length) {
+    return false
+  }
+
+  return crypto.timingSafeEqual(
+    left,
+    right
+  )
+}
+
+
+// ------------------------------------------------------------
+// SALVAR / ATUALIZAR CONEXÃO YOUTUBE
+// ------------------------------------------------------------
+
+app.post(
+  '/account/youtube/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        access_token,
+        refresh_token,
+        scope,
+        token_type,
+        expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      await db.query(
+        `
+          INSERT INTO youtube_connections (
+            user_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_type,
+            expires_at,
+            updated_at
+          )
+
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            NOW()
+          )
+
+          ON CONFLICT (user_id)
+
+          DO UPDATE SET
+            access_token =
+              EXCLUDED.access_token,
+
+            refresh_token =
+              COALESCE(
+                EXCLUDED.refresh_token,
+                youtube_connections.refresh_token
+              ),
+
+            scope =
+              EXCLUDED.scope,
+
+            token_type =
+              EXCLUDED.token_type,
+
+            expires_at =
+              EXCLUDED.expires_at,
+
+            updated_at =
+              NOW()
+        `,
+        [
+          user.id,
+          access_token,
+          refresh_token || null,
+          scope || null,
+          token_type || 'Bearer',
+          expires_at || null
+        ]
+      )
+
+      return res.json({
+        connected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'YouTube connection save error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to save YouTube connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// BUSCAR CONEXÃO YOUTUBE
+// SOMENTE PARA SERVIÇO INTERNO
+// ------------------------------------------------------------
+
+app.get(
+  '/account/youtube/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              access_token,
+              refresh_token,
+              scope,
+              token_type,
+              expires_at
+            FROM youtube_connections
+            WHERE user_id = $1
+            LIMIT 1
+          `,
+          [user.id]
+        )
+
+      const connection =
+        result.rows[0]
+
+      if (!connection) {
+        return res.json({
+          connected: false
+        })
+      }
+
+      return res.json({
+        connected: true,
+
+        connection: {
+          access_token:
+            connection.access_token,
+
+          refresh_token:
+            connection.refresh_token,
+
+          scope:
+            connection.scope,
+
+          token_type:
+            connection.token_type,
+
+          expires_at:
+            connection.expires_at
+              ? Number(
+                  connection.expires_at
+                )
+              : null
+        }
+      })
+
+    } catch (error) {
+      console.error(
+        'YouTube connection get error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to get YouTube connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// ATUALIZAR TOKENS APÓS REFRESH
+// ------------------------------------------------------------
+
+app.patch(
+  '/account/youtube/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        access_token,
+        scope,
+        token_type,
+        expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE youtube_connections
+
+            SET
+              access_token = $1,
+              scope = $2,
+              token_type = $3,
+              expires_at = $4,
+              updated_at = NOW()
+
+            WHERE user_id = $5
+
+            RETURNING id
+          `,
+          [
+            access_token,
+            scope || null,
+            token_type || 'Bearer',
+            expires_at || null,
+            user.id
+          ]
+        )
+
+      if (!result.rowCount) {
+        return res.status(404).json({
+          error:
+            'YouTube connection not found.'
+        })
+      }
+
+      return res.json({
+        updated: true
+      })
+
+    } catch (error) {
+      console.error(
+        'YouTube connection update error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to update YouTube connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// DESCONECTAR YOUTUBE
+// ------------------------------------------------------------
+
+app.delete(
+  '/account/youtube/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      await db.query(
+        `
+          DELETE FROM youtube_connections
+          WHERE user_id = $1
+        `,
+        [user.id]
+      )
+
+      return res.json({
+        disconnected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'YouTube disconnect error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to disconnect YouTube.'
+      })
+    }
+  }
+)
+
+
 async function setupDatabase() {
   try {
 await db.query(`
