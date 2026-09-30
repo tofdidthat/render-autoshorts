@@ -2720,15 +2720,17 @@ app.get(
               email,
               name,
               picture,
+              email_verified,
               updated_at
             )
-            VALUES ($1, $2, $3, $4, NOW())
+            VALUES ($1, $2, $3, $4, TRUE, NOW())
 
             ON CONFLICT (google_id)
             DO UPDATE SET
               email = EXCLUDED.email,
               name = EXCLUDED.name,
               picture = EXCLUDED.picture,
+              email_verified = TRUE,
               updated_at = NOW()
 
             RETURNING id
@@ -4043,13 +4045,45 @@ async function setupDatabase() {
 await db.query(`
   CREATE TABLE IF NOT EXISTS account_users (
     id SERIAL PRIMARY KEY,
-    google_id TEXT UNIQUE NOT NULL,
+    google_id TEXT UNIQUE,
     email TEXT NOT NULL,
+    password_hash TEXT,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
     name TEXT,
     picture TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
   )
+`)
+
+// Prepara contas existentes para suportar Google OU Email/Senha.
+// Usuários que já entraram pelo Google têm o e-mail considerado verificado.
+await db.query(`
+  ALTER TABLE account_users
+  ALTER COLUMN google_id DROP NOT NULL
+`)
+
+await db.query(`
+  ALTER TABLE account_users
+  ADD COLUMN IF NOT EXISTS password_hash TEXT
+`)
+
+await db.query(`
+  ALTER TABLE account_users
+  ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE
+`)
+
+await db.query(`
+  UPDATE account_users
+  SET email_verified = TRUE
+  WHERE google_id IS NOT NULL
+    AND email_verified = FALSE
+`)
+
+await db.query(`
+  CREATE UNIQUE INDEX IF NOT EXISTS
+    account_users_email_lower_unique_idx
+  ON account_users (LOWER(email))
 `)
 
 await db.query(`
