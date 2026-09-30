@@ -2699,6 +2699,79 @@ async function sendAccountVerificationEmail(email, code) {
   return data
 }
 
+async function sendPasswordResetEmail(email, code) {
+  const apiKey = process.env.RESEND_API_KEY
+  const from = process.env.RESEND_FROM_EMAIL || '1CE <no-reply@1ce.lol>'
+
+  if (!apiKey) throw new Error('RESEND_API_KEY não configurada.')
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from,
+      to: [email],
+      subject: 'Reset your 1CE password',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:32px;color:#111">
+          <h1 style="font-size:24px;margin:0 0 18px">Reset your password</h1>
+          <p style="font-size:16px;line-height:1.5">Use this code to reset your 1CE password:</p>
+          <div style="font-size:36px;font-weight:700;letter-spacing:8px;margin:28px 0">${code}</div>
+          <p style="font-size:14px;color:#666">This code expires in ${EMAIL_CODE_TTL_MINUTES} minutes.</p>
+          <p style="font-size:14px;color:#666">If you did not request a password reset, you can ignore this email.</p>
+        </div>
+      `
+    })
+  })
+
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    console.error('Resend password reset error:', data)
+    throw new Error(data?.message || `Resend respondeu HTTP ${response.status}`)
+  }
+  return data
+}
+
+async function issuePasswordResetCode(userId, email) {
+  const recent = await db.query(
+    `SELECT created_at FROM account_password_resets WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  )
+
+  if (recent.rows.length) {
+    const elapsed = Date.now() - new Date(recent.rows[0].created_at).getTime()
+    if (elapsed < EMAIL_RESEND_COOLDOWN_SECONDS * 1000) {
+      const error = new Error('Please wait before requesting another code.')
+      error.statusCode = 429
+      throw error
+    }
+  }
+
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0')
+  const codeHash = hashEmailVerificationCode(code)
+
+  await db.query(
+    `UPDATE account_password_resets SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+    [userId]
+  )
+
+  const inserted = await db.query(
+    `INSERT INTO account_password_resets (user_id, code_hash, expires_at)
+     VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 minute')) RETURNING id`,
+    [userId, codeHash, EMAIL_CODE_TTL_MINUTES]
+  )
+
+  try {
+    await sendPasswordResetEmail(email, code)
+  } catch (error) {
+    await db.query(`DELETE FROM account_password_resets WHERE id = $1`, [inserted.rows[0].id]).catch(() => {})
+    throw error
+  }
+}
+
 async function issueEmailVerificationCode(userId, email) {
   const recent = await db.query(
     `
@@ -3024,6 +3097,140 @@ app.post('/account/email/resend', async (req, res) => {
       })
   }
 })
+
+app.post('/account/password/forgot', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+    if (!isValidAccountEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email.' })
+    }
+
+    const result = await db.query(
+      `SELECT id FROM account_users WHERE LOWER(email) = $1 LIMIT 1`,
+      [email]
+    )
+
+    // Generic response prevents account enumeration.
+    if (!result.rows.length) {
+      return res.json({ ok: true })
+    }
+
+    await issuePasswordResetCode(result.rows[0].id, email)
+    return res.json({ ok: true })
+  } catch (error) {
+    console.error('Password forgot error:', error)
+    return res.status(error?.statusCode || 500).json({
+      error: error?.statusCode === 429 ? error.message : 'Unable to request password reset.'
+    })
+  }
+})
+
+app.post('/account/password/verify', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+    const code = String(req.body?.code || '').trim()
+
+    if (!isValidAccountEmail(email) || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'Invalid email or code.' })
+    }
+
+    const userResult = await db.query(
+      `SELECT id FROM account_users WHERE LOWER(email) = $1 LIMIT 1`,
+      [email]
+    )
+    if (!userResult.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const resetResult = await db.query(
+      `SELECT id, code_hash, attempts FROM account_password_resets
+       WHERE user_id = $1 AND used_at IS NULL AND verified_at IS NULL AND expires_at > NOW()
+       ORDER BY created_at DESC LIMIT 1`,
+      [userResult.rows[0].id]
+    )
+    if (!resetResult.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const reset = resetResult.rows[0]
+    if (reset.attempts >= EMAIL_MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Too many attempts. Request a new code.' })
+    }
+
+    const expected = Buffer.from(reset.code_hash, 'hex')
+    const received = Buffer.from(hashEmailVerificationCode(code), 'hex')
+    const valid = expected.length === received.length && crypto.timingSafeEqual(expected, received)
+
+    if (!valid) {
+      await db.query(`UPDATE account_password_resets SET attempts = attempts + 1 WHERE id = $1`, [reset.id])
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex')
+    const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex')
+
+    await db.query(
+      `UPDATE account_password_resets
+       SET verified_at = NOW(), reset_token_hash = $1, reset_token_expires_at = NOW() + INTERVAL '10 minutes'
+       WHERE id = $2`,
+      [resetTokenHash, reset.id]
+    )
+
+    return res.json({ ok: true, resetToken })
+  } catch (error) {
+    console.error('Password reset verify error:', error)
+    return res.status(500).json({ error: 'Unable to verify reset code.' })
+  }
+})
+
+app.post('/account/password/reset', async (req, res) => {
+  try {
+    const resetToken = String(req.body?.resetToken || '')
+    const password = String(req.body?.password || '')
+
+    if (!resetToken || password.length < 8 || password.length > 128) {
+      return res.status(400).json({ error: 'Invalid reset token or password.' })
+    }
+
+    const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex')
+    const resetResult = await db.query(
+      `SELECT id, user_id FROM account_password_resets
+       WHERE reset_token_hash = $1 AND verified_at IS NOT NULL AND used_at IS NULL
+         AND reset_token_expires_at > NOW()
+       LIMIT 1`,
+      [resetTokenHash]
+    )
+    if (!resetResult.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired reset token.' })
+    }
+
+    const reset = resetResult.rows[0]
+    const passwordHash = await hashAccountPassword(password)
+    const client = await db.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE account_users SET password_hash = $1, email_verified = TRUE, updated_at = NOW() WHERE id = $2`,
+        [passwordHash, reset.user_id]
+      )
+      await client.query(`UPDATE account_password_resets SET used_at = NOW() WHERE id = $1`, [reset.id])
+      // Sign out existing sessions after a password reset.
+      await client.query(`DELETE FROM account_sessions WHERE user_id = $1`, [reset.user_id])
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+
+    return res.json({ ok: true })
+  } catch (error) {
+    console.error('Password reset error:', error)
+    return res.status(500).json({ error: 'Unable to reset password.' })
+  }
+})
+
 
 app.post('/account/email/login', async (req, res) => {
   try {
@@ -4728,6 +4935,29 @@ await db.query(`
   CREATE INDEX IF NOT EXISTS
     account_email_verifications_user_id_idx
   ON account_email_verifications(user_id)
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_password_resets (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    reset_token_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    verified_at TIMESTAMPTZ,
+    reset_token_expires_at TIMESTAMPTZ,
+    used_at TIMESTAMPTZ
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    account_password_resets_user_id_idx
+  ON account_password_resets(user_id)
 `)
 
 await db.query(`
