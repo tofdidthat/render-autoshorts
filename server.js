@@ -3268,6 +3268,136 @@ app.delete(
   }
 )
 
+// ============================================================
+// 1CE - TIKTOK CONNECTION STORAGE
+// Comunicação privada Vercel <-> Railway
+// ============================================================
+
+// ------------------------------------------------------------
+// SALVAR / ATUALIZAR CONEXÃO TIKTOK
+// ------------------------------------------------------------
+
+app.post(
+  '/account/tiktok/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        open_id,
+        access_token,
+        refresh_token,
+        scope,
+        token_type,
+        expires_at,
+        refresh_expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      await db.query(
+        `
+          INSERT INTO tiktok_connections (
+            user_id,
+            open_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_type,
+            expires_at,
+            refresh_expires_at,
+            updated_at
+          )
+
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            NOW()
+          )
+
+          ON CONFLICT (user_id)
+
+          DO UPDATE SET
+            open_id =
+              EXCLUDED.open_id,
+
+            access_token =
+              EXCLUDED.access_token,
+
+            refresh_token =
+              COALESCE(
+                EXCLUDED.refresh_token,
+                tiktok_connections.refresh_token
+              ),
+
+            scope =
+              EXCLUDED.scope,
+
+            token_type =
+              EXCLUDED.token_type,
+
+            expires_at =
+              EXCLUDED.expires_at,
+
+            refresh_expires_at =
+              EXCLUDED.refresh_expires_at,
+
+            updated_at =
+              NOW()
+        `,
+        [
+          user.id,
+          open_id || null,
+          access_token,
+          refresh_token || null,
+          scope || null,
+          token_type || 'Bearer',
+          expires_at || null,
+          refresh_expires_at || null
+        ]
+      )
+
+      return res.json({
+        connected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'TikTok connection save error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to save TikTok connection.'
+      })
+    }
+  }
+)
 
 async function setupDatabase() {
   try {
