@@ -45,12 +45,12 @@ app.use((req, res, next) => {
 
   res.setHeader(
     'Access-Control-Allow-Methods',
-    'GET, POST, DELETE, OPTIONS'
+    'GET, POST, PATCH, DELETE, OPTIONS'
   )
 
   res.setHeader(
   'Access-Control-Allow-Headers',
-  'Content-Type, Authorization'
+  'Content-Type, Authorization, X-1CE-Internal-Secret'
 )
 
   res.setHeader(
@@ -3645,6 +3645,399 @@ app.delete(
   }
 )
 
+
+// ============================================================
+// 1CE - INSTAGRAM CONNECTION STORAGE
+// Comunicação privada Vercel <-> Railway
+// ============================================================
+
+// ------------------------------------------------------------
+// SALVAR / ATUALIZAR CONEXÃO INSTAGRAM
+// ------------------------------------------------------------
+
+app.post(
+  '/account/instagram/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        instagram_user_id,
+        page_id,
+        page_name,
+        username,
+        access_token,
+        token_type,
+        expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      await db.query(
+        `
+          INSERT INTO instagram_connections (
+            user_id,
+            instagram_user_id,
+            page_id,
+            page_name,
+            username,
+            access_token,
+            token_type,
+            expires_at,
+            updated_at
+          )
+
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            NOW()
+          )
+
+          ON CONFLICT (user_id)
+
+          DO UPDATE SET
+            instagram_user_id =
+              EXCLUDED.instagram_user_id,
+
+            page_id =
+              EXCLUDED.page_id,
+
+            page_name =
+              EXCLUDED.page_name,
+
+            username =
+              EXCLUDED.username,
+
+            access_token =
+              EXCLUDED.access_token,
+
+            token_type =
+              EXCLUDED.token_type,
+
+            expires_at =
+              EXCLUDED.expires_at,
+
+            updated_at =
+              NOW()
+        `,
+        [
+          user.id,
+          instagram_user_id || null,
+          page_id || null,
+          page_name || null,
+          username || null,
+          access_token,
+          token_type || 'Bearer',
+          expires_at || null
+        ]
+      )
+
+      return res.json({
+        connected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram connection save error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to save Instagram connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// BUSCAR CONEXÃO INSTAGRAM
+// SOMENTE PARA SERVIÇO INTERNO
+// ------------------------------------------------------------
+
+app.get(
+  '/account/instagram/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              instagram_user_id,
+              page_id,
+              page_name,
+              username,
+              access_token,
+              token_type,
+              expires_at
+            FROM instagram_connections
+            WHERE user_id = $1
+            LIMIT 1
+          `,
+          [user.id]
+        )
+
+      const connection =
+        result.rows[0]
+
+      if (!connection) {
+        return res.json({
+          connected: false
+        })
+      }
+
+      return res.json({
+        connected: true,
+
+        connection: {
+          instagram_user_id:
+            connection.instagram_user_id,
+
+          page_id:
+            connection.page_id,
+
+          page_name:
+            connection.page_name,
+
+          username:
+            connection.username,
+
+          access_token:
+            connection.access_token,
+
+          token_type:
+            connection.token_type,
+
+          expires_at:
+            connection.expires_at
+              ? Number(connection.expires_at)
+              : null
+        }
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram connection get error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to get Instagram connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// ATUALIZAR TOKEN / DADOS INSTAGRAM
+// ------------------------------------------------------------
+
+app.patch(
+  '/account/instagram/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        instagram_user_id,
+        page_id,
+        page_name,
+        username,
+        access_token,
+        token_type,
+        expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE instagram_connections
+
+            SET
+              instagram_user_id =
+                COALESCE(
+                  $1,
+                  instagram_user_id
+                ),
+
+              page_id =
+                COALESCE(
+                  $2,
+                  page_id
+                ),
+
+              page_name =
+                COALESCE(
+                  $3,
+                  page_name
+                ),
+
+              username =
+                COALESCE(
+                  $4,
+                  username
+                ),
+
+              access_token = $5,
+              token_type = $6,
+              expires_at = $7,
+              updated_at = NOW()
+
+            WHERE user_id = $8
+
+            RETURNING id
+          `,
+          [
+            instagram_user_id || null,
+            page_id || null,
+            page_name || null,
+            username || null,
+            access_token,
+            token_type || 'Bearer',
+            expires_at || null,
+            user.id
+          ]
+        )
+
+      if (!result.rowCount) {
+        return res.status(404).json({
+          error:
+            'Instagram connection not found.'
+        })
+      }
+
+      return res.json({
+        updated: true
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram connection update error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to update Instagram connection.'
+      })
+    }
+  }
+)
+
+
+// ------------------------------------------------------------
+// DESCONECTAR INSTAGRAM
+// ------------------------------------------------------------
+
+app.delete(
+  '/account/instagram/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      await db.query(
+        `
+          DELETE FROM instagram_connections
+          WHERE user_id = $1
+        `,
+        [user.id]
+      )
+
+      return res.json({
+        disconnected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram disconnect error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to disconnect Instagram.'
+      })
+    }
+  }
+)
+
 async function setupDatabase() {
   try {
 await db.query(`
@@ -3732,6 +4125,36 @@ await db.query(`
   CREATE INDEX IF NOT EXISTS
     tiktok_connections_user_id_idx
   ON tiktok_connections(user_id)
+`)
+
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS instagram_connections (
+    id SERIAL PRIMARY KEY,
+
+    user_id INTEGER NOT NULL UNIQUE
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+
+    instagram_user_id TEXT,
+    page_id TEXT,
+    page_name TEXT,
+    username TEXT,
+
+    access_token TEXT NOT NULL,
+    token_type TEXT DEFAULT 'Bearer',
+
+    expires_at BIGINT,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    instagram_connections_user_id_idx
+  ON instagram_connections(user_id)
 `)
     
 await db.query(`
