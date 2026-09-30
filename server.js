@@ -3496,6 +3496,105 @@ app.get(
   }
 )
 
+// ------------------------------------------------------------
+// ATUALIZAR TOKENS TIKTOK APÓS REFRESH
+// ------------------------------------------------------------
+
+app.patch(
+  '/account/tiktok/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const {
+        access_token,
+        refresh_token,
+        scope,
+        token_type,
+        expires_at,
+        refresh_expires_at
+      } = req.body || {}
+
+      if (!access_token) {
+        return res.status(400).json({
+          error: 'access_token is required.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE tiktok_connections
+
+            SET
+              access_token = $1,
+
+              refresh_token =
+                COALESCE(
+                  $2,
+                  refresh_token
+                ),
+
+              scope = $3,
+              token_type = $4,
+              expires_at = $5,
+              refresh_expires_at = $6,
+              updated_at = NOW()
+
+            WHERE user_id = $7
+
+            RETURNING id
+          `,
+          [
+            access_token,
+            refresh_token || null,
+            scope || null,
+            token_type || 'Bearer',
+            expires_at || null,
+            refresh_expires_at || null,
+            user.id
+          ]
+        )
+
+      if (!result.rowCount) {
+        return res.status(404).json({
+          error:
+            'TikTok connection not found.'
+        })
+      }
+
+      return res.json({
+        updated: true
+      })
+
+    } catch (error) {
+      console.error(
+        'TikTok connection update error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to update TikTok connection.'
+      })
+    }
+  }
+)
+
 async function setupDatabase() {
   try {
 await db.query(`
