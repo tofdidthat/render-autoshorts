@@ -3399,6 +3399,103 @@ app.post(
   }
 )
 
+// ------------------------------------------------------------
+// BUSCAR CONEXÃO TIKTOK
+// SOMENTE PARA SERVIÇO INTERNO
+// ------------------------------------------------------------
+
+app.get(
+  '/account/tiktok/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              open_id,
+              access_token,
+              refresh_token,
+              scope,
+              token_type,
+              expires_at,
+              refresh_expires_at
+            FROM tiktok_connections
+            WHERE user_id = $1
+            LIMIT 1
+          `,
+          [user.id]
+        )
+
+      const connection =
+        result.rows[0]
+
+      if (!connection) {
+        return res.json({
+          connected: false
+        })
+      }
+
+      return res.json({
+        connected: true,
+
+        connection: {
+          open_id:
+            connection.open_id,
+
+          access_token:
+            connection.access_token,
+
+          refresh_token:
+            connection.refresh_token,
+
+          scope:
+            connection.scope,
+
+          token_type:
+            connection.token_type,
+
+          expires_at:
+            connection.expires_at
+              ? Number(connection.expires_at)
+              : null,
+
+          refresh_expires_at:
+            connection.refresh_expires_at
+              ? Number(connection.refresh_expires_at)
+              : null
+        }
+      })
+
+    } catch (error) {
+      console.error(
+        'TikTok connection get error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to get TikTok connection.'
+      })
+    }
+  }
+)
+
 async function setupDatabase() {
   try {
 await db.query(`
