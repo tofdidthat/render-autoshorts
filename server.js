@@ -3247,40 +3247,128 @@ app.get(
         )
       }
 
-      // Cria ou atualiza usuário 1CE
-      const userResult =
-        await db.query(
-          `
-            INSERT INTO account_users (
-              google_id,
-              email,
-              name,
-              picture,
-              email_verified,
-              updated_at
+      // Cria, atualiza ou vincula usuário 1CE.
+      // Se já existir uma conta com o mesmo e-mail, mantém o mesmo
+      // usuário (inclusive password_hash) e apenas vincula o Google.
+      const googleEmail =
+        normalizeAccountEmail(googleUser.email)
+
+      const client = await db.connect()
+      let userId
+
+      try {
+        await client.query('BEGIN')
+
+        const existingByGoogle =
+          await client.query(
+            `
+              SELECT id, email
+              FROM account_users
+              WHERE google_id = $1
+              LIMIT 1
+              FOR UPDATE
+            `,
+            [googleUser.sub]
+          )
+
+        if (existingByGoogle.rows.length) {
+          userId = existingByGoogle.rows[0].id
+
+          await client.query(
+            `
+              UPDATE account_users
+              SET email = $1,
+                  name = $2,
+                  picture = $3,
+                  email_verified = TRUE,
+                  updated_at = NOW()
+              WHERE id = $4
+            `,
+            [
+              googleEmail,
+              googleUser.name || '',
+              googleUser.picture || '',
+              userId
+            ]
+          )
+        } else {
+          const existingByEmail =
+            await client.query(
+              `
+                SELECT id, google_id
+                FROM account_users
+                WHERE LOWER(email) = $1
+                LIMIT 1
+                FOR UPDATE
+              `,
+              [googleEmail]
             )
-            VALUES ($1, $2, $3, $4, TRUE, NOW())
 
-            ON CONFLICT (google_id)
-            DO UPDATE SET
-              email = EXCLUDED.email,
-              name = EXCLUDED.name,
-              picture = EXCLUDED.picture,
-              email_verified = TRUE,
-              updated_at = NOW()
+          if (existingByEmail.rows.length) {
+            const existingUser = existingByEmail.rows[0]
 
-            RETURNING id
-          `,
-          [
-            googleUser.sub,
-            googleUser.email,
-            googleUser.name || '',
-            googleUser.picture || ''
-          ]
-        )
+            if (
+              existingUser.google_id &&
+              existingUser.google_id !== googleUser.sub
+            ) {
+              throw new Error(
+                'Este e-mail já está vinculado a outra conta Google.'
+              )
+            }
 
-      const userId =
-        userResult.rows[0].id
+            userId = existingUser.id
+
+            await client.query(
+              `
+                UPDATE account_users
+                SET google_id = $1,
+                    name = COALESCE(NULLIF($2, ''), name),
+                    picture = COALESCE(NULLIF($3, ''), picture),
+                    email_verified = TRUE,
+                    updated_at = NOW()
+                WHERE id = $4
+              `,
+              [
+                googleUser.sub,
+                googleUser.name || '',
+                googleUser.picture || '',
+                userId
+              ]
+            )
+          } else {
+            const created =
+              await client.query(
+                `
+                  INSERT INTO account_users (
+                    google_id,
+                    email,
+                    name,
+                    picture,
+                    email_verified,
+                    updated_at
+                  )
+                  VALUES ($1, $2, $3, $4, TRUE, NOW())
+                  RETURNING id
+                `,
+                [
+                  googleUser.sub,
+                  googleEmail,
+                  googleUser.name || '',
+                  googleUser.picture || ''
+                ]
+              )
+
+            userId = created.rows[0].id
+          }
+        }
+
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
 
       // Cria sessão própria da 1CE
       const sessionToken =
