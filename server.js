@@ -3595,6 +3595,56 @@ app.patch(
   }
 )
 
+// ------------------------------------------------------------
+// DESCONECTAR TIKTOK
+// ------------------------------------------------------------
+
+app.delete(
+  '/account/tiktok/connection',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      await db.query(
+        `
+          DELETE FROM tiktok_connections
+          WHERE user_id = $1
+        `,
+        [user.id]
+      )
+
+      return res.json({
+        disconnected: true
+      })
+
+    } catch (error) {
+      console.error(
+        'TikTok disconnect error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to disconnect TikTok.'
+      })
+    }
+  }
+)
+
 async function setupDatabase() {
   try {
 await db.query(`
