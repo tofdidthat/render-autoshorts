@@ -2544,6 +2544,542 @@ async function getAccountFromRequest(req) {
 
 
 // ------------------------------------------------------------
+// EMAIL / PASSWORD AUTH
+// Cadastro + verificação por código enviado pelo Resend
+// ------------------------------------------------------------
+
+const EMAIL_CODE_TTL_MINUTES = 10
+const EMAIL_RESEND_COOLDOWN_SECONDS = 60
+const EMAIL_MAX_ATTEMPTS = 5
+
+function normalizeAccountEmail(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function isValidAccountEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+function hashEmailVerificationCode(code) {
+  return crypto
+    .createHash('sha256')
+    .update(String(code))
+    .digest('hex')
+}
+
+function hashAccountPassword(password) {
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16)
+
+    crypto.scrypt(
+      String(password),
+      salt,
+      64,
+      { N: 16384, r: 8, p: 1 },
+      (error, derivedKey) => {
+        if (error) return reject(error)
+
+        resolve(
+          `scrypt$${salt.toString('hex')}$${derivedKey.toString('hex')}`
+        )
+      }
+    )
+  })
+}
+
+function verifyAccountPassword(password, storedHash) {
+  return new Promise((resolve, reject) => {
+    const parts = String(storedHash || '').split('$')
+
+    if (parts.length !== 3 || parts[0] !== 'scrypt') {
+      return resolve(false)
+    }
+
+    let salt
+    let expected
+
+    try {
+      salt = Buffer.from(parts[1], 'hex')
+      expected = Buffer.from(parts[2], 'hex')
+    } catch {
+      return resolve(false)
+    }
+
+    if (!salt.length || !expected.length) {
+      return resolve(false)
+    }
+
+    crypto.scrypt(
+      String(password),
+      salt,
+      expected.length,
+      { N: 16384, r: 8, p: 1 },
+      (error, derivedKey) => {
+        if (error) return reject(error)
+
+        if (derivedKey.length !== expected.length) {
+          return resolve(false)
+        }
+
+        resolve(
+          crypto.timingSafeEqual(derivedKey, expected)
+        )
+      }
+    )
+  })
+}
+
+async function createAccountSession(userId) {
+  const sessionToken = createAccountSessionToken()
+  const tokenHash = hashAccountSessionToken(sessionToken)
+
+  await db.query(
+    `
+      INSERT INTO account_sessions (
+        user_id,
+        token_hash,
+        expires_at
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() + INTERVAL '30 days'
+      )
+    `,
+    [userId, tokenHash]
+  )
+
+  return sessionToken
+}
+
+async function sendAccountVerificationEmail(email, code) {
+  const apiKey = process.env.RESEND_API_KEY
+  const from =
+    process.env.RESEND_FROM_EMAIL ||
+    '1CE <no-reply@1ce.lol>'
+
+  if (!apiKey) {
+    throw new Error('RESEND_API_KEY não configurada.')
+  }
+
+  const response = await fetch(
+    'https://api.resend.com/emails',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from,
+        to: [email],
+        subject: 'Your 1CE verification code',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:32px;color:#111">
+            <h1 style="font-size:24px;margin:0 0 18px">Verify your email</h1>
+            <p style="font-size:16px;line-height:1.5">Use this code to finish creating your 1CE account:</p>
+            <div style="font-size:36px;font-weight:700;letter-spacing:8px;margin:28px 0">${code}</div>
+            <p style="font-size:14px;color:#666">This code expires in ${EMAIL_CODE_TTL_MINUTES} minutes.</p>
+            <p style="font-size:14px;color:#666">If you did not request this code, you can ignore this email.</p>
+          </div>
+        `
+      })
+    }
+  )
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    console.error('Resend error:', data)
+    throw new Error(
+      data?.message || `Resend respondeu HTTP ${response.status}`
+    )
+  }
+
+  return data
+}
+
+async function issueEmailVerificationCode(userId, email) {
+  const recent = await db.query(
+    `
+      SELECT created_at
+      FROM account_email_verifications
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [userId]
+  )
+
+  if (recent.rows.length) {
+    const elapsed =
+      Date.now() - new Date(recent.rows[0].created_at).getTime()
+
+    if (elapsed < EMAIL_RESEND_COOLDOWN_SECONDS * 1000) {
+      const error = new Error('Please wait before requesting another code.')
+      error.statusCode = 429
+      throw error
+    }
+  }
+
+  const code = String(
+    crypto.randomInt(0, 1000000)
+  ).padStart(6, '0')
+
+  const codeHash = hashEmailVerificationCode(code)
+
+  await db.query(
+    `
+      UPDATE account_email_verifications
+      SET used_at = NOW()
+      WHERE user_id = $1
+        AND used_at IS NULL
+    `,
+    [userId]
+  )
+
+  const inserted = await db.query(
+    `
+      INSERT INTO account_email_verifications (
+        user_id,
+        code_hash,
+        expires_at
+      )
+      VALUES (
+        $1,
+        $2,
+        NOW() + ($3 * INTERVAL '1 minute')
+      )
+      RETURNING id
+    `,
+    [userId, codeHash, EMAIL_CODE_TTL_MINUTES]
+  )
+
+  try {
+    await sendAccountVerificationEmail(email, code)
+  } catch (error) {
+    await db.query(
+      `DELETE FROM account_email_verifications WHERE id = $1`,
+      [inserted.rows[0].id]
+    ).catch(() => {})
+
+    throw error
+  }
+}
+
+app.post('/account/email/register', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+    const password = String(req.body?.password || '')
+    const name = String(req.body?.name || '').trim().slice(0, 120)
+
+    if (!isValidAccountEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email.' })
+    }
+
+    if (password.length < 8 || password.length > 128) {
+      return res.status(400).json({
+        error: 'Password must contain between 8 and 128 characters.'
+      })
+    }
+
+    const existing = await db.query(
+      `
+        SELECT id, password_hash, email_verified
+        FROM account_users
+        WHERE LOWER(email) = $1
+        LIMIT 1
+      `,
+      [email]
+    )
+
+    let userId
+
+    if (existing.rows.length) {
+      const user = existing.rows[0]
+
+      if (user.email_verified || user.password_hash) {
+        return res.status(409).json({
+          error: 'An account with this email already exists.'
+        })
+      }
+
+      const passwordHash = await hashAccountPassword(password)
+
+      const updated = await db.query(
+        `
+          UPDATE account_users
+          SET password_hash = $1,
+              name = COALESCE(NULLIF($2, ''), name),
+              updated_at = NOW()
+          WHERE id = $3
+          RETURNING id
+        `,
+        [passwordHash, name, user.id]
+      )
+
+      userId = updated.rows[0].id
+    } else {
+      const passwordHash = await hashAccountPassword(password)
+
+      const created = await db.query(
+        `
+          INSERT INTO account_users (
+            email,
+            password_hash,
+            email_verified,
+            name,
+            updated_at
+          )
+          VALUES ($1, $2, FALSE, $3, NOW())
+          RETURNING id
+        `,
+        [email, passwordHash, name]
+      )
+
+      userId = created.rows[0].id
+    }
+
+    await issueEmailVerificationCode(userId, email)
+
+    return res.status(201).json({
+      ok: true,
+      verificationRequired: true,
+      email
+    })
+  } catch (error) {
+    console.error('Email register error:', error)
+
+    return res
+      .status(error?.statusCode || 500)
+      .json({
+        error:
+          error?.statusCode === 429
+            ? error.message
+            : 'Unable to create account.'
+      })
+  }
+})
+
+app.post('/account/email/verify', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+    const code = String(req.body?.code || '').trim()
+
+    if (!isValidAccountEmail(email) || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'Invalid email or code.' })
+    }
+
+    const userResult = await db.query(
+      `
+        SELECT id, email_verified
+        FROM account_users
+        WHERE LOWER(email) = $1
+        LIMIT 1
+      `,
+      [email]
+    )
+
+    if (!userResult.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const user = userResult.rows[0]
+
+    if (user.email_verified) {
+      return res.status(409).json({ error: 'Email is already verified.' })
+    }
+
+    const verificationResult = await db.query(
+      `
+        SELECT id, code_hash, attempts
+        FROM account_email_verifications
+        WHERE user_id = $1
+          AND used_at IS NULL
+          AND expires_at > NOW()
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [user.id]
+    )
+
+    if (!verificationResult.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const verification = verificationResult.rows[0]
+
+    if (verification.attempts >= EMAIL_MAX_ATTEMPTS) {
+      return res.status(429).json({
+        error: 'Too many attempts. Request a new code.'
+      })
+    }
+
+    const receivedHash = hashEmailVerificationCode(code)
+    const expected = Buffer.from(verification.code_hash, 'hex')
+    const received = Buffer.from(receivedHash, 'hex')
+
+    const valid =
+      expected.length === received.length &&
+      crypto.timingSafeEqual(expected, received)
+
+    if (!valid) {
+      await db.query(
+        `
+          UPDATE account_email_verifications
+          SET attempts = attempts + 1
+          WHERE id = $1
+        `,
+        [verification.id]
+      )
+
+      return res.status(400).json({ error: 'Invalid or expired code.' })
+    }
+
+    const client = await db.connect()
+
+    try {
+      await client.query('BEGIN')
+
+      await client.query(
+        `
+          UPDATE account_users
+          SET email_verified = TRUE,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [user.id]
+      )
+
+      await client.query(
+        `
+          UPDATE account_email_verifications
+          SET used_at = NOW()
+          WHERE user_id = $1
+            AND used_at IS NULL
+        `,
+        [user.id]
+      )
+
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+
+    const sessionToken = await createAccountSession(user.id)
+
+    return res.json({
+      ok: true,
+      verified: true,
+      session: sessionToken
+    })
+  } catch (error) {
+    console.error('Email verification error:', error)
+    return res.status(500).json({ error: 'Unable to verify email.' })
+  }
+})
+
+app.post('/account/email/resend', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+
+    if (!isValidAccountEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email.' })
+    }
+
+    const result = await db.query(
+      `
+        SELECT id, email_verified, password_hash
+        FROM account_users
+        WHERE LOWER(email) = $1
+        LIMIT 1
+      `,
+      [email]
+    )
+
+    if (!result.rows.length || result.rows[0].email_verified) {
+      return res.json({ ok: true })
+    }
+
+    if (!result.rows[0].password_hash) {
+      return res.json({ ok: true })
+    }
+
+    await issueEmailVerificationCode(result.rows[0].id, email)
+
+    return res.json({ ok: true })
+  } catch (error) {
+    console.error('Email resend error:', error)
+
+    return res
+      .status(error?.statusCode || 500)
+      .json({
+        error:
+          error?.statusCode === 429
+            ? error.message
+            : 'Unable to resend verification code.'
+      })
+  }
+})
+
+app.post('/account/email/login', async (req, res) => {
+  try {
+    const email = normalizeAccountEmail(req.body?.email)
+    const password = String(req.body?.password || '')
+
+    if (!isValidAccountEmail(email) || !password) {
+      return res.status(401).json({ error: 'Invalid email or password.' })
+    }
+
+    const result = await db.query(
+      `
+        SELECT id, password_hash, email_verified
+        FROM account_users
+        WHERE LOWER(email) = $1
+        LIMIT 1
+      `,
+      [email]
+    )
+
+    const user = result.rows[0]
+
+    if (!user || !user.password_hash) {
+      return res.status(401).json({ error: 'Invalid email or password.' })
+    }
+
+    const validPassword = await verifyAccountPassword(
+      password,
+      user.password_hash
+    )
+
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid email or password.' })
+    }
+
+    if (!user.email_verified) {
+      return res.status(403).json({
+        error: 'Email verification required.',
+        verificationRequired: true
+      })
+    }
+
+    const sessionToken = await createAccountSession(user.id)
+
+    return res.json({
+      ok: true,
+      session: sessionToken
+    })
+  } catch (error) {
+    console.error('Email login error:', error)
+    return res.status(500).json({ error: 'Unable to sign in.' })
+  }
+})
+
+
+// ------------------------------------------------------------
 // INICIA LOGIN GOOGLE
 // ------------------------------------------------------------
 
@@ -4084,6 +4620,26 @@ await db.query(`
   CREATE UNIQUE INDEX IF NOT EXISTS
     account_users_email_lower_unique_idx
   ON account_users (LOWER(email))
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_email_verifications (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    account_email_verifications_user_id_idx
+  ON account_email_verifications(user_id)
 `)
 
 await db.query(`
