@@ -3327,6 +3327,36 @@ await db.query(`
     youtube_connections_user_id_idx
   ON youtube_connections(user_id)
 `)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS tiktok_connections (
+    id SERIAL PRIMARY KEY,
+
+    user_id INTEGER NOT NULL UNIQUE
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+
+    open_id TEXT,
+
+    access_token TEXT NOT NULL,
+    refresh_token TEXT,
+
+    scope TEXT,
+    token_type TEXT DEFAULT 'Bearer',
+
+    expires_at BIGINT,
+    refresh_expires_at BIGINT,
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS
+    tiktok_connections_user_id_idx
+  ON tiktok_connections(user_id)
+`)
     
 await db.query(`
   CREATE INDEX IF NOT EXISTS
