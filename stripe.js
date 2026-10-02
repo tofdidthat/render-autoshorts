@@ -15,6 +15,31 @@ function getStripeSecretKey() {
   return key
 }
 
+async function stripePost(path, params) {
+  const response = await fetch(
+    `${STRIPE_API_URL}${path}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${getStripeSecretKey()}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: params.toString()
+    }
+  )
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+      `Stripe respondeu HTTP ${response.status}`
+    )
+  }
+
+  return data
+}
+
 export async function createStripeCheckoutSession({
   market,
   customerEmail,
@@ -53,26 +78,24 @@ export async function createStripeCheckoutSession({
   params.set('metadata[onece_market]', market)
   params.set('subscription_data[metadata][onece_market]', market)
 
-  const response = await fetch(
-    `${STRIPE_API_URL}/checkout/sessions`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${getStripeSecretKey()}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: params.toString()
-    }
-  )
+  return stripePost('/checkout/sessions', params)
+}
 
-  const data = await response.json().catch(() => ({}))
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message ||
-      `Stripe respondeu HTTP ${response.status}`
-    )
+export async function createStripeBillingPortalSession({
+  customerId
+}) {
+  if (!customerId) {
+    throw new Error('Stripe customer não encontrado para esta conta.')
   }
 
-  return data
+  const frontendUrl = (
+    process.env.ONECE_FRONTEND_URL ||
+    'https://1ce.lol'
+  ).replace(/\/$/, '')
+
+  const params = new URLSearchParams()
+  params.set('customer', String(customerId))
+  params.set('return_url', `${frontendUrl}/account`)
+
+  return stripePost('/billing_portal/sessions', params)
 }
