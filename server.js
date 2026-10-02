@@ -7,7 +7,10 @@ import path from 'path'
 import crypto from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { createStripeCheckoutSession } from './stripe.js'
+import {
+  createStripeCheckoutSession,
+  createStripeBillingPortalSession
+} from './stripe.js'
 
 const { Pool } = pg
 
@@ -3955,6 +3958,74 @@ app.post(
       res.status(500).json({
         error:
           'Falha ao encerrar sessão.'
+      })
+    }
+  }
+)
+
+// ============================================================
+// 1CE - STRIPE CUSTOMER PORTAL
+// ============================================================
+
+app.post(
+  '/stripe/create-portal-session',
+
+  async (req, res) => {
+    try {
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const subscriptionResult =
+        await db.query(
+          `
+            SELECT stripe_customer_id
+            FROM stripe_subscriptions
+            WHERE user_id = $1
+            LIMIT 1
+          `,
+          [user.id]
+        )
+
+      const customerId =
+        subscriptionResult.rows[0]?.stripe_customer_id
+
+      if (!customerId) {
+        return res.status(404).json({
+          error: 'Stripe customer not found for this account.'
+        })
+      }
+
+      const session =
+        await createStripeBillingPortalSession({
+          customerId
+        })
+
+      if (!session?.url) {
+        throw new Error(
+          'Stripe Billing Portal session returned without URL.'
+        )
+      }
+
+      return res.json({
+        url: session.url
+      })
+
+    } catch (error) {
+      console.error(
+        'Stripe billing portal session error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          error?.message ||
+          'Failed to create Stripe Billing Portal session.'
       })
     }
   }
