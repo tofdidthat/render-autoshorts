@@ -7,6 +7,7 @@ import path from 'path'
 import crypto from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { createStripeCheckoutSession } from './stripe.js'
 
 const { Pool } = pg
 
@@ -3726,6 +3727,72 @@ app.post(
     }
   }
 )
+
+// ============================================================
+// 1CE - STRIPE CHECKOUT
+// ============================================================
+
+app.post(
+  '/stripe/create-checkout-session',
+
+  async (req, res) => {
+    try {
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const market =
+        String(req.body?.market || '')
+          .trim()
+          .toLowerCase()
+
+      if (
+        market !== 'br' &&
+        market !== 'global'
+      ) {
+        return res.status(400).json({
+          error: 'Invalid market. Use br or global.'
+        })
+      }
+
+      const session =
+        await createStripeCheckoutSession({
+          market,
+          customerEmail: user.email,
+          userId: user.id
+        })
+
+      if (!session?.url) {
+        throw new Error(
+          'Stripe Checkout session returned without URL.'
+        )
+      }
+
+      return res.json({
+        url: session.url,
+        sessionId: session.id
+      })
+
+    } catch (error) {
+      console.error(
+        'Stripe checkout session error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          error?.message ||
+          'Failed to create Stripe Checkout session.'
+      })
+    }
+  }
+)
+
 
 // ============================================================
 // 1CE - YOUTUBE CONNECTION STORAGE
