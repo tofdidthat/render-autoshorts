@@ -30,7 +30,9 @@ app.use(express.json({
   verify: (req, res, buf) => {
     if (
       req.originalUrl ===
-      '/discord/interactions'
+      '/discord/interactions' ||
+      req.originalUrl ===
+      '/stripe/webhook'
     ) {
       req.rawBody = buf
     }
@@ -3626,6 +3628,208 @@ app.get(
 )
 
 
+// ============================================================
+// 1CE - STRIPE WEBHOOK / SUBSCRIPTION SYNC
+// ============================================================
+
+function verifyStripeWebhookSignature(req) {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET
+  const header = String(req.headers['stripe-signature'] || '')
+
+  if (!secret || !header || !req.rawBody) return false
+
+  const parts = header.split(',')
+  const timestamp = parts.find(part => part.startsWith('t='))?.slice(2)
+  const signatures = parts
+    .filter(part => part.startsWith('v1='))
+    .map(part => part.slice(3))
+
+  if (!timestamp || !signatures.length) return false
+
+  const ageSeconds = Math.abs(Date.now() / 1000 - Number(timestamp))
+  if (!Number.isFinite(ageSeconds) || ageSeconds > 300) return false
+
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${req.rawBody.toString('utf8')}`)
+    .digest('hex')
+
+  return signatures.some(signature => {
+    try {
+      const a = Buffer.from(signature, 'hex')
+      const b = Buffer.from(expected, 'hex')
+      return a.length === b.length && crypto.timingSafeEqual(a, b)
+    } catch {
+      return false
+    }
+  })
+}
+
+function stripePlanFromStatus(status) {
+  return ['active', 'trialing'].includes(String(status || '').toLowerCase())
+    ? 'pro'
+    : 'free'
+}
+
+async function upsertStripeSubscription({
+  userId,
+  customerId,
+  subscriptionId,
+  status,
+  priceId = null,
+  currentPeriodEnd = null,
+  cancelAtPeriodEnd = false
+}) {
+  if (!userId) return
+
+  await db.query(
+    `
+      INSERT INTO stripe_subscriptions (
+        user_id,
+        stripe_customer_id,
+        stripe_subscription_id,
+        status,
+        price_id,
+        current_period_end,
+        cancel_at_period_end,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET
+        stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, stripe_subscriptions.stripe_customer_id),
+        stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, stripe_subscriptions.stripe_subscription_id),
+        status = EXCLUDED.status,
+        price_id = COALESCE(EXCLUDED.price_id, stripe_subscriptions.price_id),
+        current_period_end = EXCLUDED.current_period_end,
+        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+        updated_at = NOW()
+    `,
+    [
+      Number(userId),
+      customerId ? String(customerId) : null,
+      subscriptionId ? String(subscriptionId) : null,
+      String(status || 'inactive'),
+      priceId ? String(priceId) : null,
+      currentPeriodEnd
+        ? new Date(Number(currentPeriodEnd) * 1000)
+        : null,
+      Boolean(cancelAtPeriodEnd)
+    ]
+  )
+}
+
+async function findStripeUserIdBySubscription(subscriptionId) {
+  if (!subscriptionId) return null
+
+  const result = await db.query(
+    `SELECT user_id FROM stripe_subscriptions WHERE stripe_subscription_id = $1 LIMIT 1`,
+    [String(subscriptionId)]
+  )
+
+  return result.rows[0]?.user_id || null
+}
+
+app.post('/stripe/webhook', async (req, res) => {
+  if (!verifyStripeWebhookSignature(req)) {
+    return res.status(400).send('Invalid Stripe signature')
+  }
+
+  const event = req.body || {}
+  const eventId = String(event.id || '')
+
+  if (!eventId) {
+    return res.status(400).send('Invalid Stripe event')
+  }
+
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+
+    const inserted = await client.query(
+      `
+        INSERT INTO stripe_webhook_events (event_id, event_type)
+        VALUES ($1, $2)
+        ON CONFLICT (event_id) DO NOTHING
+        RETURNING event_id
+      `,
+      [eventId, String(event.type || '')]
+    )
+
+    if (!inserted.rows.length) {
+      await client.query('COMMIT')
+      return res.json({ received: true, duplicate: true })
+    }
+
+    const object = event.data?.object || {}
+
+    if (event.type === 'checkout.session.completed') {
+      const userId = object.client_reference_id || object.metadata?.onece_user_id
+
+      if (userId && object.subscription) {
+        await upsertStripeSubscription({
+          userId,
+          customerId: object.customer,
+          subscriptionId: object.subscription,
+          status: object.payment_status === 'paid' ? 'active' : 'incomplete'
+        })
+      }
+    }
+
+    if (
+      event.type === 'customer.subscription.created' ||
+      event.type === 'customer.subscription.updated' ||
+      event.type === 'customer.subscription.deleted'
+    ) {
+      const userId =
+        object.metadata?.onece_user_id ||
+        await findStripeUserIdBySubscription(object.id)
+
+      if (userId) {
+        await upsertStripeSubscription({
+          userId,
+          customerId: object.customer,
+          subscriptionId: object.id,
+          status: event.type === 'customer.subscription.deleted'
+            ? 'canceled'
+            : object.status,
+          priceId: object.items?.data?.[0]?.price?.id || null,
+          currentPeriodEnd: object.current_period_end || null,
+          cancelAtPeriodEnd: object.cancel_at_period_end || false
+        })
+      }
+    }
+
+    if (event.type === 'invoice.payment_failed') {
+      const subscriptionId =
+        typeof object.subscription === 'string'
+          ? object.subscription
+          : object.subscription?.id
+
+      const userId = await findStripeUserIdBySubscription(subscriptionId)
+
+      if (userId) {
+        await upsertStripeSubscription({
+          userId,
+          customerId: object.customer,
+          subscriptionId,
+          status: 'past_due'
+        })
+      }
+    }
+
+    await client.query('COMMIT')
+    return res.json({ received: true })
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('Stripe webhook error:', error)
+    return res.status(500).json({ error: 'Stripe webhook failed.' })
+  } finally {
+    client.release()
+  }
+})
+
 // ------------------------------------------------------------
 // USUÁRIO LOGADO
 // ------------------------------------------------------------
@@ -3646,14 +3850,42 @@ app.get(
           })
       }
 
+      const subscriptionResult = await db.query(
+        `
+          SELECT
+            status,
+            stripe_customer_id,
+            stripe_subscription_id,
+            price_id,
+            current_period_end,
+            cancel_at_period_end
+          FROM stripe_subscriptions
+          WHERE user_id = $1
+          LIMIT 1
+        `,
+        [user.id]
+      )
+
+      const subscription = subscriptionResult.rows[0] || null
+      const plan = stripePlanFromStatus(subscription?.status)
+
       res.json({
         authenticated: true,
+        plan,
+        subscription: subscription
+          ? {
+              status: subscription.status,
+              currentPeriodEnd: subscription.current_period_end,
+              cancelAtPeriodEnd: subscription.cancel_at_period_end
+            }
+          : null,
 
         user: {
           id: user.id,
           email: user.email,
           name: user.name,
-          picture: user.picture
+          picture: user.picture,
+          plan
         }
       })
 
@@ -5145,6 +5377,36 @@ await db.query(`
 `)
 
     
+await db.query(`
+  CREATE TABLE IF NOT EXISTS stripe_subscriptions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT UNIQUE,
+    status TEXT NOT NULL DEFAULT 'inactive',
+    price_id TEXT,
+    current_period_end TIMESTAMPTZ,
+    cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS stripe_subscriptions_customer_idx
+  ON stripe_subscriptions(stripe_customer_id)
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`)
+
     await db.query(`
       CREATE TABLE IF NOT EXISTS telegram_connections (
         id SERIAL PRIMARY KEY,
