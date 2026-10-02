@@ -38,7 +38,6 @@ export async function createStripeCheckoutSession({
   params.set('line_items[0][quantity]', '1')
   params.set('success_url', `${frontendUrl}/app?checkout=success&session_id={CHECKOUT_SESSION_ID}`)
   params.set('cancel_url', market === 'br' ? `${frontendUrl}/pt/pricing` : `${frontendUrl}/pricing`)
-  params.set('managed_payments[enabled]', 'true')
   params.set('allow_promotion_codes', 'true')
 
   if (customerEmail) {
