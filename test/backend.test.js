@@ -11,6 +11,8 @@ import ffmpeg from 'ffmpeg-static'
 import ffprobe from 'ffprobe-static'
 import { app, db, renders, setupDatabase, deleteRender } from '../server.js'
 import { startDesktopGoogle, consumeDesktopGoogle } from '../desktop.js'
+import {publicationRedirectScript} from '../publication-page.js'
+import vm from 'node:vm'
 
 const run = promisify(execFile)
 const sha = value => crypto.createHash('sha256').update(value).digest('hex')
@@ -50,6 +52,17 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       assert.equal((await post('/api/desktop/authorize', {})).status, 503)
       await setupDatabase()
       assert.ok((await pg.query("SELECT to_regclass('desktop_credentials') AS name")).rows[0].name)
+    })
+    await t.test('existing desktop handoff redirects safely to the 1CE app',async()=>{
+      const ticket='a'.repeat(43),id=crypto.randomUUID()
+      let destination
+      const location={hash:'#ticket='+ticket,search:'',pathname:'/api/desktop/publish',replace(value){destination=new URL(value)}}
+      await vm.runInNewContext(publicationRedirectScript('https://1ce.lol'),{location,URL,URLSearchParams,
+        history:{replaceState(){}},sessionStorage:{getItem(){return null},removeItem(){}},
+        document:{getElementById(){return {}}},fetch:async()=>Response.json({requestId:id})})
+      assert.equal(destination.origin,'https://1ce.lol');assert.equal(destination.pathname,'/app')
+      assert.equal(destination.searchParams.get('desktopPublication'),id)
+      assert.ok(!destination.search.includes(ticket));assert.equal(new URLSearchParams(destination.hash.slice(1)).get('ticket'),ticket)
     })
     await query(`INSERT INTO account_users (email,name,email_verified) VALUES
       ('first@example.com','First',TRUE),('second@example.com','Second',TRUE)`)
@@ -284,10 +297,20 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         if(address.startsWith('https://open-upload.tiktokapis.com/')){sends.tiktok++;return new Response('',{status:201})}
         if(address.startsWith('https://api.telegram.org/')){sends.telegram++;return Response.json({ok:true,result:{message_id:1}})}
         if(address.startsWith('https://discord.com/api/')){sends.discord++;return Response.json({id:'message-test'})}
+        if(address==='https://oauth2.googleapis.com/token')return Response.json({access_token:'google-platform-secret'})
+        if(address==='https://openidconnect.googleapis.com/v1/userinfo')return Response.json({sub:'google-first-user',email:'first@example.com',email_verified:true,name:'First'})
         if(address.startsWith(origin))return originalFetch(url,opts)
         throw new Error('Unexpected network request '+address)
       }
       try {
+        const google=await fetch(origin+'/account/google?desktop_publication='+created.data.requestId+'&desktop_ui=app',{redirect:'manual'})
+        assert.equal(google.status,302)
+        const state=new URL(google.headers.get('location')).searchParams.get('state')
+        const callback=await fetch(origin+'/account/google/callback?code=test-code&state='+encodeURIComponent(state),{redirect:'manual',headers:{cookie:google.headers.get('set-cookie').split(';')[0]}})
+        const returnTo=new URL(callback.headers.get('location'))
+        assert.equal(returnTo.origin,'https://1ce.lol');assert.equal(returnTo.pathname,'/app')
+        assert.equal(returnTo.searchParams.get('desktopPublication'),created.data.requestId)
+        assert.match(returnTo.hash,/#session=/);assert.ok(!returnTo.toString().includes('google-platform-secret'))
         const review=await post('/api/desktop/publish-review',{ticket},session1)
         assert.equal(review.status,200,JSON.stringify(review.data))
         assert.equal(review.data.connections.length,5)

@@ -190,5 +190,10 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
   function checkGrant(render,grant) {
     return render && render.publicationBusyUntil>Date.now() && validPublicationTicket(grant) && render.platformGrantHash===hash(grant)
   }
-  return {create,lookup,byId,connections,confirm,checkGrant}
+  function reviewOrigin() {
+    const url=new URL(frontendUrl())
+    if(url.protocol!=='https:')throw new Error('Review origin must use HTTPS')
+    return url.origin
+  }
+  return {create,lookup,byId,connections,confirm,checkGrant,reviewOrigin}
 }

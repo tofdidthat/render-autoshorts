@@ -2,7 +2,7 @@ import express from 'express'
 import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import {publicationHtml,publicationCss,publicationScript} from './publication-page.js'
+import {publicationHtml,publicationCss,publicationRedirectScript} from './publication-page.js'
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex')
 const secret = () => crypto.randomBytes(32).toString('base64url')
@@ -48,7 +48,7 @@ export async function startDesktopGoogle(req, res, db) {
     const pending=await db.query(`SELECT id FROM desktop_publications WHERE id=$1 AND status='pending' AND expires_at>NOW()`,[id])
     if (!pending.rowCount) throw new Error('Publication expired')
     const state=`desktop_${secret()}`,browser=secret()
-    await db.query(`INSERT INTO desktop_google_states (state_hash,browser_hash,user_code) VALUES ($1,$2,$3)`,[hash(state),hash(browser),'publish:'+id])
+    await db.query(`INSERT INTO desktop_google_states (state_hash,browser_hash,user_code) VALUES ($1,$2,$3)`,[hash(state),hash(browser),(req.query.desktop_ui==='app'?'publishapp:':'publish:')+id])
     res.cookie('desktop_oauth',browser,{httpOnly:true,secure:true,sameSite:'lax',path:'/account/google/callback',maxAge:ttl*1000})
     return state
   }
@@ -302,7 +302,7 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     res.type('html').send(publicationHtml)
   })
   router.get('/publish.css',(req,res)=>res.type('css').send(publicationCss))
-  router.get('/publish.js',(req,res)=>res.type('js').send(publicationScript))
+  router.get('/publish.js',(req,res)=>res.type('js').send(publicationRedirectScript(publicationService.reviewOrigin())))
   router.post('/publish-confirm', limited, account, async(req,res)=> {
     const {ticket,title,description='',targets,youtubePrivacy}=req.body || {}
     if (typeof title!=='string'||!title.trim()||title.trim().length>100 || typeof description!=='string'||description.length>900 ||

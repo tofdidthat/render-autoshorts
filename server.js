@@ -3599,6 +3599,10 @@ app.get(
       )
 
       if (desktopCode) {
+        if (desktopCode.startsWith('publishapp:')) {
+          return res.redirect(publicationService.reviewOrigin()+'/app?desktopPublication='+encodeURIComponent(desktopCode.slice(11))+
+            '#session='+encodeURIComponent(sessionToken))
+        }
         if (desktopCode.startsWith('publish:')) {
           return res.redirect('/api/desktop/publish?request='+encodeURIComponent(desktopCode.slice(8))+
             '#session='+encodeURIComponent(sessionToken))

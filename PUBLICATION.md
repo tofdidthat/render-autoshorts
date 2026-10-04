@@ -26,3 +26,7 @@ After upgrading, sign into the site and reconnect Telegram/Discord to associate 
 ## Validation
 
 `npm test` uses real PostgreSQL-compatible PGlite SQL and real FFmpeg/ffprobe. Provider HTTP calls are mocked: no content is published by the tests. Coverage includes existing rendering/preparation, private media, authorization, five-provider transfers after consent, changed connections, duplicate confirmation, revocation, cancellation, process-interruption state, bot account linking and Telegram webhook authentication. Companion site tests exercise internal authorization, sanitized identities, explicit YouTube privacy and TikTok initialization.
+
+## App frontend handoff
+
+Desktop confirmation uses the existing https://1ce.lol/app frontend. Existing installers continue receiving the same backend handoff origin; its landing page transfers the opaque ticket in a URL fragment to the canonical frontend. The app removes it from the address and keeps it in tab-scoped sessionStorage keyed by request id. Login and connection OAuth returns preserve the pending request. Google publication authorization uses a distinct publishapp state and returns only the 1CE account session to the app, never platform OAuth credentials. Confirmation still requires an account session plus ticket and server-side connection fingerprints; legacy site generation and uploads are unchanged.
