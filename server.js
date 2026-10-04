@@ -1,4 +1,6 @@
 import express from 'express'
+import { createRenderService } from './render-service.js'
+import { createDesktopRouter, setupDesktopDatabase, startDesktopGoogle, consumeDesktopGoogle } from './desktop.js'
 import multer from 'multer'
 import fs from 'fs'
 import pg from 'pg'
@@ -7,6 +9,7 @@ import path from 'path'
 import crypto from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { fileURLToPath } from 'node:url'
 import {
   createStripeCheckoutSession,
   createStripeBillingPortalSession
@@ -107,7 +110,7 @@ function deleteRender(renderId) {
 function scheduleRenderCleanup(renderId) {
   setTimeout(() => {
     deleteRender(renderId)
-  }, RENDER_TTL_MS)
+  }, RENDER_TTL_MS).unref()
 }
 
 setInterval(() => {
@@ -248,6 +251,30 @@ app.get('/', (req, res) => {
   })
 })
 
+const renderAudio = createRenderService({
+  execFileAsync, renders, scheduleRenderCleanup, deleteFile
+})
+let desktopDatabaseReady = false
+
+// Desktop renders stay private and cannot enter legacy publication routes.
+app.use((req, res, next) => {
+  if (req.path.toLowerCase().startsWith('/api/desktop/')) return next()
+  let decodedPath
+  try { decodedPath = decodeURIComponent(req.path) } catch { return res.sendStatus(400) }
+  const pathId = decodedPath.match(/^\/(?:render|public-render)\/([^/]+?)\/?$/i)?.[1]?.replace(/\.mp4$/i, '')
+  const id = req.body?.renderId || pathId
+  if (typeof id === 'string' && renders.get(id)?.ownerUserId != null) {
+    return res.status(404).json({ error: 'Render não encontrado.' })
+  }
+  next()
+})
+
+app.use('/api/desktop', createDesktopRouter({
+  db, getAccountFromRequest, renderAudio, renders, deleteRender, deleteFile,
+  execFileAsync, ready: () => desktopDatabaseReady,
+  publicUrl: () => process.env.BACKEND_PUBLIC_URL
+}))
+
 app.post(
   '/render',
 
@@ -289,107 +316,10 @@ app.post(
         })
       }
 
-      renderId =
-        crypto.randomUUID()
-
-      outputPath = path.join(
-        os.tmpdir(),
-        `${renderId}.mp4`
-      )
-
-      const startedAt =
-        Date.now()
-
-      await execFileAsync(
-        'ffmpeg',
-        [
-          '-y',
-
-          '-framerate',
-          '1',
-
-          '-loop',
-          '1',
-
-          '-i',
-          cover.path,
-
-          '-i',
-          audio.path,
-
-          '-c:v',
-          'libx264',
-
-          '-preset',
-          'ultrafast',
-
-          '-tune',
-          'stillimage',
-
-          '-vf',
-          'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
-
-          '-pix_fmt',
-          'yuv420p',
-
-          '-r',
-          '30',
-
-          '-c:a',
-          'aac',
-
-          '-b:a',
-          '192k',
-
-          '-shortest',
-
-          '-movflags',
-          '+faststart',
-
-          outputPath
-        ]
-      )
-
-      const ffmpegSeconds =
-        (
-          (
-            Date.now() -
-            startedAt
-          ) /
-          1000
-        ).toFixed(2)
-
-      console.log(
-        `FFmpeg terminou em ${ffmpegSeconds}s`
-      )
-
-      const stats =
-        fs.statSync(outputPath)
-
-      renders.set(
-        renderId,
-        {
-          id: renderId,
-          path: outputPath,
-          size: stats.size,
-          mimeType: 'video/mp4',
-          createdAt: Date.now()
-        }
-      )
-
+      const render = await renderAudio({ cover, audio })
+      renderId = render.id
+      outputPath = render.path
       renderSaved = true
-
-      scheduleRenderCleanup(
-        renderId
-      )
-
-      console.log(
-        `Render temporário salvo: ${renderId} - ${(
-          stats.size /
-          1024 /
-          1024
-        ).toFixed(2)} MB`
-      )
 
       cleanupInputs()
 
@@ -3298,7 +3228,7 @@ app.post('/account/email/login', async (req, res) => {
 
 app.get(
   '/account/google',
-  (req, res) => {
+  async (req, res) => {
     const clientId =
       process.env.GOOGLE_ACCOUNT_CLIENT_ID
 
@@ -3312,8 +3242,12 @@ app.get(
       })
     }
 
-    const state =
-      crypto.randomBytes(24).toString('hex')
+    let state = crypto.randomBytes(24).toString('hex')
+    if (req.query.desktop_user_code !== undefined) {
+      if (!desktopDatabaseReady) return res.sendStatus(503)
+      try { state = await startDesktopGoogle(req, res, db) }
+      catch { return res.status(400).json({ error: 'Invalid desktop authorization.' }) }
+    }
 
     const params =
       new URLSearchParams({
@@ -3350,6 +3284,8 @@ app.get(
 
   async (req, res) => {
     try {
+      const desktopState = String(req.query.state || '').startsWith('desktop_')
+      const desktopCode = desktopState ? await consumeDesktopGoogle(req, res, db) : null
       const code =
         String(req.query.code || '')
 
@@ -3610,6 +3546,13 @@ app.get(
           tokenHash
         ]
       )
+
+      if (desktopCode) {
+        return res.redirect(
+          '/api/desktop/connect?user_code=' + encodeURIComponent(desktopCode) +
+          '#session=' + encodeURIComponent(sessionToken)
+        )
+      }
 
       // Token vai no fragmento (#), não na query string.
       // O fragmento não é enviado ao servidor da Vercel.
@@ -5521,7 +5464,9 @@ await db.query(`
   )
 `)
     
-  console.log('Telegram + Discord database ready.')
+  await setupDesktopDatabase(db)
+  desktopDatabaseReady = true
+  console.log('Telegram + Discord + Desktop database ready.')
   } catch (error) {
     console.error(
       'Error preparing Telegram database:',
@@ -5530,9 +5475,11 @@ await db.query(`
   }
 }
 
+export { app, db, renders, setupDatabase, deleteRender }
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 setupDatabase()
 registerDiscordCommands()
-
 app.listen(
   port,
   '0.0.0.0',
@@ -5543,3 +5490,5 @@ app.listen(
     )
   }
 )
+}
+
