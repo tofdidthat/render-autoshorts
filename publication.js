@@ -67,7 +67,7 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
           : provider === 'tiktok' ? connection.open_id : 'Canal YouTube conectado à conta 1CE',
         visibility: provider === 'tiktok' ? 'Caixa de entrada: concluir publicação no TikTok'
           : provider === 'instagram' ? 'Reel na conta selecionada'
-          : provider === 'telegram' || provider === 'discord' ? 'Membros do chat/canal selecionado' : 'Escolher visibilidade' }
+          : provider === 'telegram' || provider === 'discord' ? 'Membros do chat/canal selecionado' : 'Público' }
       if (provider === 'telegram' && !process.env.TELEGRAM_BOT_TOKEN || provider === 'discord' && !process.env.DISCORD_BOT_TOKEN) {
         item.ready = false; item.reason = 'Bot não configurado no Railway.'
       } else if (['youtube','tiktok','instagram'].includes(provider)) {
@@ -162,6 +162,7 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
     return {state:'uploaded',message:'Enviado à caixa de entrada do TikTok. Abra o aplicativo para concluir a publicação.',id:String(start.publishId)}
   }
   async function confirm(row, metadata, accountToken) {
+    metadata={...metadata,youtubePrivacy:'public'}
     const available=await connections(row.user_id,accountToken)
     const selected=metadata.targets.map(target=>available.find(item=>item.provider===target.provider && item.ready && item.fingerprint===target.fingerprint))
     if (selected.some(item=>!item)) return false

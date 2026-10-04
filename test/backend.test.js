@@ -286,6 +286,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
           assert.equal(opts.headers.Authorization,'Bearer '+session1)
           const body=JSON.parse(opts.body)
           if(body.action==='describe')return Response.json({connected:true,name:body.provider+' studio'})
+          if(body.action==='init' && body.provider==='youtube')assert.equal(body.privacyStatus,'public','Desktop YouTube uploads must always be public')
           if(body.action==='init')return Response.json(body.provider==='youtube'?{uploadUrl:'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}:{uploadUrl:'https://open-upload.tiktokapis.com/video/?upload_id=test',publishId:'draft-test'})
           assert.equal(body.provider,'instagram');sends.instagram++;privateUrl=body.videoUrl
           const media=await originalFetch(origin+new URL(privateUrl).pathname+new URL(privateUrl).search)

@@ -8,7 +8,7 @@ The private MP4 remains available for ten minutes while pending. A confirmed job
 
 ## Existing platform behavior
 
-- YouTube: existing resumable upload, explicit private/unlisted/public visibility. The site upload flow retains its previous public default. Upload-only OAuth may prevent showing a channel name; the review warns to check Connections.
+- YouTube: existing resumable upload, public visibility for desktop publications, enforced server-side after browser confirmation. The site upload flow retains its previous public default. Upload-only OAuth may prevent showing a channel name; the review warns to check Connections.
 - TikTok: existing `video.upload` inbox flow; the user must finish posting in TikTok. This is not Direct Post.
 - Instagram: existing Reel container processing/publishing, with account-owned stored connection and a temporary private media URL rather than a public render.
 - Telegram and Discord: existing cover + MP3 handlers, server-selected account-owned chat/channel. No claim of legacy clientId-only rows is attempted.
