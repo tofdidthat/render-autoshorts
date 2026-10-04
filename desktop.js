@@ -277,6 +277,10 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     if (!result) return res.sendStatus(404)
     res.json(result)
   })
+  router.get('/connections', limited, account, async(req,res)=> {
+    const accountToken=req.headers.authorization.slice(7).trim()
+    res.json({connections:await publicationService.connections(req.account.id,accountToken)})
+  })
   router.post('/publish-review', limited, account, async(req,res)=> {
     const row=await publicationService.lookup(req.body?.ticket,req.account.id)
     if (!row) return res.status(404).json({error:'Solicitação expirada ou pertencente a outra conta 1CE.'})
