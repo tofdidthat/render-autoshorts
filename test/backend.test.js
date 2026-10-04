@@ -326,6 +326,11 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       } finally {globalThis.fetch=originalFetch}
     })
     await t.test('bot connections bind account codes, reject forged webhook and disconnect only the owner', async () => {
+      assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:credential.access_token})).status,401)
+      assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:session2})).status,200)
+      assert.equal((await query('SELECT * FROM instagram_connections WHERE user_id=1')).rowCount,1)
+      assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:session1})).status,200)
+      assert.equal((await query('SELECT * FROM instagram_connections WHERE user_id=1')).rowCount,0)
       assert.equal((await post('/telegram/connect-code',{clientId:'new-client'},session1)).status,503)
       process.env.TELEGRAM_WEBHOOK_SECRET='test-webhook'
       const issued=await post('/telegram/connect-code',{clientId:'new-client'},session1)

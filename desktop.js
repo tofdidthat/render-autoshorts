@@ -210,6 +210,10 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     await db.query(`UPDATE desktop_credentials SET revoked_at = NOW() WHERE id = $1`, [req.desktop.id])
     res.sendStatus(204)
   })
+  router.delete('/connections/instagram', account, async(req,res)=> {
+    await db.query('DELETE FROM instagram_connections WHERE user_id=$1',[req.account.id])
+    res.json({disconnected:true})
+  })
   router.post('/upload', desktop, (req, res, next) => {
     if (activeUploads.has(req.desktop.user_id)) return res.status(429).json({ error: 'Upload already in progress.' })
     activeUploads.add(req.desktop.user_id)
