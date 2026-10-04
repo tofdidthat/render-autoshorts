@@ -2,6 +2,7 @@ import express from 'express'
 import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import {publicationHtml,publicationCss,publicationScript} from './publication-page.js'
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex')
 const secret = () => crypto.randomBytes(32).toString('base64url')
@@ -41,6 +42,16 @@ export async function setupDesktopDatabase(db) {
 
 // These states are separate from platform OAuth tokens and cannot select arbitrary redirects.
 export async function startDesktopGoogle(req, res, db) {
+  if (req.query.desktop_publication) {
+    const id=String(req.query.desktop_publication)
+    if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid publication')
+    const pending=await db.query(`SELECT id FROM desktop_publications WHERE id=$1 AND status='pending' AND expires_at>NOW()`,[id])
+    if (!pending.rowCount) throw new Error('Publication expired')
+    const state=`desktop_${secret()}`,browser=secret()
+    await db.query(`INSERT INTO desktop_google_states (state_hash,browser_hash,user_code) VALUES ($1,$2,$3)`,[hash(state),hash(browser),'publish:'+id])
+    res.cookie('desktop_oauth',browser,{httpOnly:true,secure:true,sameSite:'lax',path:'/account/google/callback',maxAge:ttl*1000})
+    return state
+  }
   const code = normalizeUserCode(req.query.desktop_user_code)
   if (!validUserCode(code)) throw new Error('Invalid desktop code')
   const pending = await db.query(`SELECT user_code FROM desktop_authorizations
@@ -69,7 +80,7 @@ export async function consumeDesktopGoogle(req, res, db) {
 }
 
 export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, renders,
-  deleteRender, deleteFile, ready = () => true, publicUrl, execFileAsync }) {
+  deleteRender, deleteFile, ready = () => true, publicUrl, execFileAsync, publicationService }) {
   const router = express.Router()
   const attempts = new Map()
   const activeUploads = new Set()
@@ -244,8 +255,72 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
   router.delete('/renders/:id', desktop, (req, res) => {
     const render = renders.get(req.params.id)
     if (!render || render.ownerUserId !== req.desktop.user_id) return res.sendStatus(404)
-    deleteRender(render.id)
+    if (render.publicationBusyUntil>Date.now()) return res.status(409).json({error:'Publication in progress.'})
+    const removed=deleteRender(render.id)
+    if (!removed) return res.sendStatus(409)
     res.sendStatus(204)
+  })
+  router.post('/publication', limited, desktop, async(req,res)=> {
+    const {renderId,title}=req.body || {}
+    if (typeof title!=='string' || !title.trim() || title.trim().length>100 || typeof renderId!=='string' || !/^[a-f0-9-]{36}$/.test(renderId)) return res.sendStatus(400)
+    const result=await publicationService.create({renderId,title:title.trim(),userId:req.desktop.user_id,credentialId:req.desktop.id})
+    if (!result) return res.status(409).json({error:'Render expired or already prepared for publication.'})
+    res.status(201).json(result)
+  })
+  router.get('/publications/:id', desktop, async(req,res)=> {
+    if (!/^[a-f0-9-]{36}$/.test(req.params.id)) return res.sendStatus(400)
+    const result=await publicationService.byId(req.params.id,req.desktop.user_id)
+    if (!result) return res.sendStatus(404)
+    res.json(result)
+  })
+  router.post('/publish-review', limited, account, async(req,res)=> {
+    const row=await publicationService.lookup(req.body?.ticket,req.account.id)
+    if (!row) return res.status(404).json({error:'Solicitação expirada ou pertencente a outra conta 1CE.'})
+    const accountToken=req.headers.authorization.slice(7).trim()
+    res.json({requestId:row.id,account:{email:req.account.email,name:req.account.name},title:row.title,
+      status:row.status,results:row.results,
+      connections:row.status==='pending' ? await publicationService.connections(req.account.id,accountToken) : []})
+  })
+  router.post('/publication-login',limited,async(req,res)=> {
+    if(typeof req.body?.ticket!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(req.body.ticket)) return res.sendStatus(400)
+    const result=await db.query(`SELECT id FROM desktop_publications WHERE ticket_hash=$1 AND status='pending' AND expires_at>NOW()`,[hash(req.body.ticket)])
+    if(!result.rowCount)return res.sendStatus(404)
+    res.json({requestId:result.rows[0].id})
+  })
+  router.post('/publish-preview',account,async(req,res)=> {
+    const row=await publicationService.lookup(req.body?.ticket,req.account.id)
+    const render=row && renders.get(row.render_id)
+    if(!render || !fs.existsSync(render.path))return res.sendStatus(404)
+    res.type('video/mp4').sendFile(render.path)
+  })
+  router.get('/publish',(req,res)=> {
+    res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src blob:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+    res.type('html').send(publicationHtml)
+  })
+  router.get('/publish.css',(req,res)=>res.type('css').send(publicationCss))
+  router.get('/publish.js',(req,res)=>res.type('js').send(publicationScript))
+  router.post('/publish-confirm', limited, account, async(req,res)=> {
+    const {ticket,title,description='',targets,youtubePrivacy}=req.body || {}
+    if (typeof title!=='string'||!title.trim()||title.trim().length>100 || typeof description!=='string'||description.length>900 ||
+      !Array.isArray(targets)||targets.length<1||targets.length>5 || new Set(targets.map(t=>t?.provider)).size!==targets.length ||
+      targets.some(t=>!['youtube','tiktok','instagram','telegram','discord'].includes(t?.provider)||!/^[a-f0-9]{64}$/.test(t?.fingerprint || '')) ||
+      (targets.some(t=>t.provider==='youtube')&&!['private','unlisted','public'].includes(youtubePrivacy))) return res.sendStatus(400)
+    const row=await publicationService.lookup(ticket,req.account.id)
+    if (!row) return res.sendStatus(404)
+    const accepted=await publicationService.confirm(row,{title:title.trim(),description,targets,youtubePrivacy},req.headers.authorization.slice(7).trim())
+    if (!accepted) return res.status(409).json({error:'Solicitação já confirmada, expirada ou conexão alterada. Recarregue a revisão.'})
+    res.status(202).json({requestId:row.id,status:'processing'})
+  })
+  router.post('/publish-cancel', limited, account, async(req,res)=> {
+    const row=await publicationService.lookup(req.body?.ticket,req.account.id)
+    if (!row) return res.sendStatus(404)
+    const result=await db.query(`UPDATE desktop_publications SET status='cancelled' WHERE id=$1 AND status='pending' RETURNING id`,[row.id])
+    res.sendStatus(result.rowCount?204:409)
+  })
+  router.get('/platform-render/:id', (req,res)=> {
+    const render=renders.get(req.params.id)
+    if (!publicationService.checkGrant(render,req.query.grant)||!fs.existsSync(render.path)) return res.sendStatus(404)
+    res.type('video/mp4').sendFile(render.path)
   })
   router.get('/connect', (req, res) => {
     res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")

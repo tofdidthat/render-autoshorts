@@ -10,6 +10,7 @@ import crypto from 'crypto'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { fileURLToPath } from 'node:url'
+import { setupPublicationDatabase, createPublicationService } from './publication.js'
 import {
   createStripeCheckoutSession,
   createStripeBillingPortalSession
@@ -96,6 +97,7 @@ function deleteRender(renderId) {
     return false
   }
 
+  if (render.publicationBusyUntil > Date.now()) return false
   deleteFile(render.path)
 
   renders.delete(renderId)
@@ -109,7 +111,7 @@ function deleteRender(renderId) {
 
 function scheduleRenderCleanup(renderId) {
   setTimeout(() => {
-    deleteRender(renderId)
+    if (!deleteRender(renderId) && renders.has(renderId)) scheduleRenderCleanup(renderId)
   }, RENDER_TTL_MS).unref()
 }
 
@@ -184,7 +186,7 @@ async function sendTelegramFile({
     `https://api.telegram.org/bot${botToken}/${method}`,
     {
       method: 'POST',
-      body: formData
+      body: formData, signal: AbortSignal.timeout(120000)
     }
   )
 
@@ -251,10 +253,27 @@ app.get('/', (req, res) => {
   })
 })
 
+const desktopHandlers = {}
+const publicationService = createPublicationService({ db, renders, handlers: desktopHandlers,
+  backendUrl: () => process.env.BACKEND_PUBLIC_URL, frontendUrl: () => process.env.ONECE_FRONTEND_URL || 'https://1ce.lol' })
+
 const renderAudio = createRenderService({
   execFileAsync, renders, scheduleRenderCleanup, deleteFile
 })
 let desktopDatabaseReady = false
+
+// Account-owned social links can be disconnected without affecting other accounts.
+for (const provider of ['telegram','discord']) {
+  app.delete('/account/'+provider+'/connection', async(req,res)=> {
+    try {
+      const account=await getAccountFromRequest(req)
+      if(!account)return res.status(401).json({error:'Invalid 1CE session.'})
+      await db.query('DELETE FROM '+provider+'_connections WHERE user_id=$1',[account.id])
+      await db.query('DELETE FROM '+provider+'_connect_codes WHERE user_id=$1',[account.id])
+      return res.json({disconnected:true})
+    }catch{return res.status(500).json({error:'Could not disconnect platform.'})}
+  })
+}
 
 // Desktop renders stay private and cannot enter legacy publication routes.
 app.use((req, res, next) => {
@@ -270,7 +289,7 @@ app.use((req, res, next) => {
 })
 
 app.use('/api/desktop', createDesktopRouter({
-  db, getAccountFromRequest, renderAudio, renders, deleteRender, deleteFile,
+  db, getAccountFromRequest, renderAudio, renders, deleteRender, deleteFile, publicationService,
   execFileAsync, ready: () => desktopDatabaseReady,
   publicUrl: () => process.env.BACKEND_PUBLIC_URL
 }))
@@ -727,7 +746,7 @@ app.get(
 app.post(
   '/upload-tiktok',
 
-  async (req, res) => {
+  desktopHandlers.tiktok = async (req, res) => {
     try {
       const {
         renderId,
@@ -859,7 +878,7 @@ app.post(
         }
 
         const tikTokResponse =
-          await fetch(
+          await (req.publicationFetch || fetch)(
             safeUploadUrl,
             {
               method: 'PUT',
@@ -1006,7 +1025,7 @@ function validateYouTubeUploadUrl(uploadUrl) {
 app.post(
   '/upload-youtube',
 
-  async (req, res) => {
+  desktopHandlers.youtube = async (req, res) => {
     try {
       const {
         renderId,
@@ -1055,7 +1074,7 @@ app.post(
         )
 
       const youtubeResponse =
-        await fetch(
+        await (req.publicationFetch || fetch)(
           safeUploadUrl,
           {
             method: 'PUT',
@@ -1143,6 +1162,9 @@ app.post('/telegram/connect-code', async (req, res) => {
       })
     }
 
+    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
+    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
+    if (account && !process.env.TELEGRAM_WEBHOOK_SECRET) return res.status(503).json({error:'Telegram account linking requires TELEGRAM_WEBHOOK_SECRET in Railway and secret_token in setWebhook.'})
     const code =
       crypto
         .randomBytes(4)
@@ -1154,17 +1176,20 @@ app.post('/telegram/connect-code', async (req, res) => {
         INSERT INTO telegram_connect_codes (
           code,
           client_id,
+          user_id,
           expires_at
         )
         VALUES (
           $1,
           $2,
+          $3,
           NOW() + INTERVAL '10 minutes'
         )
       `,
       [
         code,
-        String(clientId)
+        String(clientId),
+        account?.id || null
       ]
     )
 
@@ -1254,6 +1279,8 @@ app.get('/telegram/connect-status', async (req, res) => {
       })
     }
 
+    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
+    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
     const result =
       await db.query(
         `
@@ -1262,11 +1289,11 @@ app.get('/telegram/connect-status', async (req, res) => {
             thread_id,
             created_at
           FROM telegram_connections
-          WHERE client_id = $1
+          WHERE ${account ? 'user_id' : 'client_id'} = $1
           ORDER BY created_at DESC
           LIMIT 1
         `,
-        [clientId]
+        [account ? account.id : clientId]
       )
 
     if (!result.rows.length) {
@@ -1370,7 +1397,7 @@ app.post('/telegram/webhook', async (req, res) => {
         `
           SELECT
             code,
-            client_id
+            client_id, user_id
           FROM telegram_connect_codes
           WHERE code = $1
             AND used_at IS NULL
@@ -1390,6 +1417,16 @@ app.post('/telegram/webhook', async (req, res) => {
       return res.json({ ok: true })
     }
 
+    if (codeResult.rows[0].user_id) {
+      const received=req.headers['x-telegram-bot-api-secret-token']
+      const expected=process.env.TELEGRAM_WEBHOOK_SECRET
+      if (!received || !expected || typeof received!=='string' || Buffer.byteLength(received)!==Buffer.byteLength(expected) ||
+          !crypto.timingSafeEqual(Buffer.from(received),Buffer.from(expected))) return res.sendStatus(401)
+    }
+    const claimed=await db.query(`UPDATE telegram_connect_codes SET used_at=NOW()
+      WHERE code=$1 AND used_at IS NULL AND expires_at>NOW() RETURNING code`,[code])
+    if (!claimed.rowCount) return res.json({ok:true})
+
     const clientId =
       codeResult.rows[0].client_id
 
@@ -1399,16 +1436,17 @@ app.post('/telegram/webhook', async (req, res) => {
           client_id,
           chat_id,
           chat_title,
-          thread_id
+          thread_id, user_id
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (
           client_id,
           chat_id,
           thread_id
         )
         DO UPDATE SET
-          chat_title = EXCLUDED.chat_title
+          chat_title = EXCLUDED.chat_title,
+          user_id = EXCLUDED.user_id
       `,
       [
         clientId,
@@ -1416,7 +1454,8 @@ app.post('/telegram/webhook', async (req, res) => {
         String(chatTitle),
         threadId
           ? String(threadId)
-          : null
+          : null,
+        codeResult.rows[0].user_id
       ]
     )
 
@@ -1471,7 +1510,7 @@ app.post('/telegram/webhook', async (req, res) => {
 app.post(
   '/publish-telegram',
 
-  async (req, res) => {
+  desktopHandlers.telegram = async (req, res) => {
     const {
   renderId,
   title,
@@ -1489,7 +1528,7 @@ app.post(
         })
       }
 
-      if (!clientId) {
+      if (!clientId && !req.publicationConnection) {
         return res.status(400).json({
           error: 'clientId não informado.'
         })
@@ -1500,7 +1539,7 @@ app.post(
       // -------------------------------------------------------
 
       const connectionResult =
-        await db.query(
+        req.publicationConnection ? { rows: [req.publicationConnection] } : await db.query(
           `
             SELECT
               chat_id,
@@ -1699,6 +1738,8 @@ app.post('/discord/connect-code', async (req, res) => {
       })
     }
 
+    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
+    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
     const code =
       crypto
         .randomBytes(4)
@@ -1710,17 +1751,20 @@ app.post('/discord/connect-code', async (req, res) => {
         INSERT INTO discord_connect_codes (
           code,
           client_id,
+          user_id,
           expires_at
         )
         VALUES (
           $1,
           $2,
+          $3,
           NOW() + INTERVAL '10 minutes'
         )
       `,
       [
         code,
-        String(clientId)
+        String(clientId),
+        account?.id || null
       ]
     )
 
@@ -1758,6 +1802,8 @@ app.get('/discord/connect-status', async (req, res) => {
       })
     }
 
+    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
+    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
     const result =
       await db.query(
         `
@@ -1768,11 +1814,11 @@ app.get('/discord/connect-status', async (req, res) => {
             channel_name,
             created_at
           FROM discord_connections
-          WHERE client_id = $1
+          WHERE ${account ? 'user_id' : 'client_id'} = $1
           ORDER BY created_at DESC
           LIMIT 1
         `,
-        [clientId]
+        [account ? account.id : clientId]
       )
 
     if (!result.rows.length) {
@@ -1950,7 +1996,7 @@ app.post('/discord/interactions', async (req, res) => {
           `
             SELECT
               code,
-              client_id
+              client_id, user_id
             FROM discord_connect_codes
             WHERE code = $1
               AND used_at IS NULL
@@ -1971,6 +2017,9 @@ app.post('/discord/interactions', async (req, res) => {
         })
       }
 
+      const claimed=await db.query(`UPDATE discord_connect_codes SET used_at=NOW()
+        WHERE code=$1 AND used_at IS NULL AND expires_at>NOW() RETURNING code`,[code])
+      if (!claimed.rowCount) return res.json({type:4,data:{content:'Invalid or already used connection code.',flags:64}})
       const clientId =
         codeResult.rows[0].client_id
 
@@ -1981,9 +2030,9 @@ app.post('/discord/interactions', async (req, res) => {
             guild_id,
             guild_name,
             channel_id,
-            channel_name
+            channel_name, user_id
           )
-          VALUES ($1, $2, $3, $4, $5)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (
             client_id,
             guild_id,
@@ -1991,14 +2040,16 @@ app.post('/discord/interactions', async (req, res) => {
           )
           DO UPDATE SET
             guild_name = EXCLUDED.guild_name,
-            channel_name = EXCLUDED.channel_name
+            channel_name = EXCLUDED.channel_name,
+            user_id = EXCLUDED.user_id
         `,
         [
           clientId,
           guildId,
           guildName,
           channelId,
-          channelName
+          channelName,
+          codeResult.rows[0].user_id
         ]
       )
 
@@ -2057,7 +2108,7 @@ app.post('/discord/interactions', async (req, res) => {
 // Envia capa + título/descrição + áudio
 // ============================================================
 
-app.post('/publish-discord', async (req, res) => {
+app.post('/publish-discord', desktopHandlers.discord = async (req, res) => {
   const {
     renderId,
     title,
@@ -2076,7 +2127,7 @@ app.post('/publish-discord', async (req, res) => {
       })
     }
 
-    if (!clientId) {
+    if (!clientId && !req.publicationConnection) {
       return res.status(400).json({
         error: 'clientId não informado.'
       })
@@ -2097,7 +2148,7 @@ app.post('/publish-discord', async (req, res) => {
     // -------------------------------------------------------
 
     const connectionResult =
-      await db.query(
+      req.publicationConnection ? { rows: [req.publicationConnection] } : await db.query(
         `
           SELECT
             guild_id,
@@ -2275,7 +2326,7 @@ discordForm.append(
 )
 
 const discordResponse =
-  await fetch(
+  await (req.publicationFetch || fetch)(
     `https://discord.com/api/v10/channels/${channelId}/messages`,
     {
       method: 'POST',
@@ -3243,7 +3294,7 @@ app.get(
     }
 
     let state = crypto.randomBytes(24).toString('hex')
-    if (req.query.desktop_user_code !== undefined) {
+    if (req.query.desktop_user_code !== undefined || req.query.desktop_publication !== undefined) {
       if (!desktopDatabaseReady) return res.sendStatus(503)
       try { state = await startDesktopGoogle(req, res, db) }
       catch { return res.status(400).json({ error: 'Invalid desktop authorization.' }) }
@@ -3548,6 +3599,10 @@ app.get(
       )
 
       if (desktopCode) {
+        if (desktopCode.startsWith('publish:')) {
+          return res.redirect('/api/desktop/publish?request='+encodeURIComponent(desktopCode.slice(8))+
+            '#session='+encodeURIComponent(sessionToken))
+        }
         return res.redirect(
           '/api/desktop/connect?user_code=' + encodeURIComponent(desktopCode) +
           '#session=' + encodeURIComponent(sessionToken)
@@ -5465,6 +5520,7 @@ await db.query(`
 `)
     
   await setupDesktopDatabase(db)
+  await setupPublicationDatabase(db)
   desktopDatabaseReady = true
   console.log('Telegram + Discord + Desktop database ready.')
   } catch (error) {

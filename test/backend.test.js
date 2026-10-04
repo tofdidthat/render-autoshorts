@@ -238,6 +238,119 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       }
       assert.equal((await api(`/render/${legacyId}`, { method: 'DELETE' })).status, 200)
     })
+    await t.test('five-platform publication requires account consent, stays private and runs once', async () => {
+      process.env.ONECE_INTERNAL_SECRET='internal-test'
+      process.env.ONECE_FRONTEND_URL='https://1ce.lol'
+      process.env.TELEGRAM_BOT_TOKEN='test-bot'
+      process.env.DISCORD_BOT_TOKEN='test-bot'
+      for(const provider of ['youtube','tiktok','instagram']) await query(`INSERT INTO ${provider}_connections (user_id,access_token) VALUES (1,'never-exposed-token')`)
+      await query(`INSERT INTO telegram_connections (client_id,chat_id,chat_title,user_id) VALUES ('legacy','-123','Studio chat',1)`)
+      await query(`INSERT INTO discord_connections (client_id,guild_id,channel_id,guild_name,channel_name,user_id) VALUES ('legacy','123','456','Studio','Beats',1)`)
+      const longAudio=path.join(bin,'long.mp3')
+      await run(ffmpeg,['-y','-f','lavfi','-i','sine=frequency=440:duration=2','-c:a','libmp3lame',longAudio])
+      const uploaded=await api('/api/desktop/upload',{method:'POST',token:credential.access_token,form:form(false,longAudio)})
+      assert.equal(uploaded.status,201)
+      const id=uploaded.data.renderId
+      const created=await post('/api/desktop/publication',{renderId:id,title:'Review beat'},credential.access_token)
+      assert.equal(created.status,201,JSON.stringify(created.data))
+      const ticket=created.data.ticket
+      const login=await post('/api/desktop/publication-login',{ticket})
+      assert.equal(login.status,200)
+      let oauthCookie
+      const oauthRes={cookie(name,value){oauthCookie=name+'='+value},clearCookie(){}}
+      const oauthState=await startDesktopGoogle({query:{desktop_publication:created.data.requestId}},oauthRes,db)
+      assert.equal(await consumeDesktopGoogle({query:{state:oauthState},headers:{cookie:oauthCookie}},oauthRes,db),'publish:'+created.data.requestId)
+      assert.ok(new URL(created.data.reviewUrl).hash.includes(ticket))
+      assert.equal((await post('/api/desktop/publish-review',{ticket},credential.access_token)).status,401)
+      assert.equal((await post('/api/desktop/publish-review',{ticket},session2)).status,404)
+      assert.equal((await api(`/api/desktop/platform-render/${id}?grant=${ticket}`)).status,404)
+      const originalFetch=globalThis.fetch
+      const sends={youtube:0,tiktok:0,instagram:0,telegram:0,discord:0}
+      let privateUrl
+      globalThis.fetch=async (url,opts)=>{
+        const address=String(url)
+        if(address==='https://1ce.lol/api/desktop/publish'){
+          assert.equal(opts.headers.Authorization,'Bearer '+session1)
+          const body=JSON.parse(opts.body)
+          if(body.action==='describe')return Response.json({connected:true,name:body.provider+' studio'})
+          if(body.action==='init')return Response.json(body.provider==='youtube'?{uploadUrl:'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}:{uploadUrl:'https://open-upload.tiktokapis.com/video/?upload_id=test',publishId:'draft-test'})
+          assert.equal(body.provider,'instagram');sends.instagram++;privateUrl=body.videoUrl
+          const media=await originalFetch(origin+new URL(privateUrl).pathname+new URL(privateUrl).search)
+          assert.equal(media.status,200)
+          assert.equal(deleteRender(id),false)
+          return Response.json({ok:true,mediaId:'ig-test'})
+        }
+        if(address.startsWith('https://www.googleapis.com/upload/')){sends.youtube++;return Response.json({id:'yt-test'})}
+        if(address.startsWith('https://open-upload.tiktokapis.com/')){sends.tiktok++;return new Response('',{status:201})}
+        if(address.startsWith('https://api.telegram.org/')){sends.telegram++;return Response.json({ok:true,result:{message_id:1}})}
+        if(address.startsWith('https://discord.com/api/')){sends.discord++;return Response.json({id:'message-test'})}
+        if(address.startsWith(origin))return originalFetch(url,opts)
+        throw new Error('Unexpected network request '+address)
+      }
+      try {
+        const review=await post('/api/desktop/publish-review',{ticket},session1)
+        assert.equal(review.status,200,JSON.stringify(review.data))
+        assert.equal(review.data.connections.length,5)
+        assert.ok(review.data.connections.every(c=>c.ready))
+        assert.ok(!JSON.stringify(review.data).includes('never-exposed-token'))
+        assert.deepEqual(Object.values(sends),[0,0,0,0,0])
+        const metadata={ticket,title:'Confirmed beat',description:'Test',youtubePrivacy:'private',targets:review.data.connections.map(c=>({provider:c.provider,fingerprint:c.fingerprint}))}
+        const stale=structuredClone(metadata);stale.targets[0].fingerprint='0'.repeat(64)
+        assert.equal((await post('/api/desktop/publish-confirm',stale,session1)).status,409)
+        assert.equal((await post('/api/desktop/publish-confirm',metadata,session1)).status,202)
+        assert.equal((await post('/api/desktop/publish-confirm',metadata,session1)).status,409)
+        let status
+        for(let attempt=0;attempt<100;attempt++){
+          status=(await api('/api/desktop/publications/'+created.data.requestId,{token:credential.access_token})).data
+          if(status.status!=='processing')break
+          await new Promise(resolve=>setTimeout(resolve,100))
+        }
+        assert.equal(status.status,'complete',JSON.stringify(status))
+        assert.deepEqual(sends,{youtube:1,tiktok:1,instagram:1,telegram:2,discord:1})
+        assert.ok(Object.values(status.results).every(r=>['published','uploaded'].includes(r.state)),JSON.stringify(status))
+        assert.ok(status.results.tiktok.message.includes('aplicativo'))
+        assert.equal((await api(new URL(privateUrl).pathname+new URL(privateUrl).search)).status,404)
+        assert.equal((await api('/api/desktop/publications/'+created.data.requestId,{token:session1})).status,401)
+        const script=await api('/api/desktop/publish.js');assert.doesNotThrow(()=>new Function(script.bytes.toString()))
+        const cancelled=await post('/api/desktop/publication',{renderId:desktopRender,title:'Cancel me'},credential.access_token)
+        assert.equal(cancelled.status,201)
+        const cancelTicket=cancelled.data.ticket
+        await query(`UPDATE desktop_credentials SET revoked_at=NOW() WHERE id=$1`,[credential.credential_id])
+        assert.equal((await post('/api/desktop/publish-review',{ticket:cancelTicket},session1)).status,404)
+        await query(`UPDATE desktop_credentials SET revoked_at=NULL WHERE id=$1`,[credential.credential_id])
+        assert.equal((await post('/api/desktop/publish-cancel',{ticket:cancelTicket},session1)).status,204)
+        assert.equal((await post('/api/desktop/publish-confirm',{...metadata,ticket:cancelTicket},session1)).status,409)
+        await query(`UPDATE desktop_publications SET status='processing' WHERE id=$1`,[cancelled.data.requestId])
+        assert.equal((await api('/api/desktop/publications/'+cancelled.data.requestId,{token:credential.access_token})).data.status,'uncertain')
+        assert.deepEqual(sends,{youtube:1,tiktok:1,instagram:1,telegram:2,discord:1})
+      } finally {globalThis.fetch=originalFetch}
+    })
+    await t.test('bot connections bind account codes, reject forged webhook and disconnect only the owner', async () => {
+      assert.equal((await post('/telegram/connect-code',{clientId:'new-client'},session1)).status,503)
+      process.env.TELEGRAM_WEBHOOK_SECRET='test-webhook'
+      const issued=await post('/telegram/connect-code',{clientId:'new-client'},session1)
+      assert.equal(issued.status,200,JSON.stringify(issued.data))
+      const code=(await query(`SELECT code FROM telegram_connect_codes WHERE client_id='new-client'`)).rows[0].code
+      assert.equal((await query(`SELECT user_id FROM telegram_connect_codes WHERE code=$1`,[code])).rows[0].user_id,1)
+      const message={message:{text:'/connect '+code,chat:{id:-555,title:'Owner chat'}}}
+      assert.equal((await post('/telegram/webhook',message)).status,401)
+      const original=globalThis.fetch
+      globalThis.fetch=async(url,opts)=>String(url).startsWith('https://api.telegram.org/')?Response.json({ok:true}):original(url,opts)
+      try{
+        const linked=await fetch(origin+'/telegram/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-telegram-bot-api-secret-token':'test-webhook'},body:JSON.stringify(message)})
+        assert.equal(linked.status,200)
+        assert.equal((await query(`SELECT user_id FROM telegram_connections WHERE chat_id='-555'`)).rows[0].user_id,1)
+      }finally{globalThis.fetch=original}
+      assert.equal((await api('/telegram/connect-status?clientId=legacy',{token:session2})).data.connected,false)
+      assert.equal((await api('/account/telegram/connection',{method:'DELETE',token:session2})).status,200)
+      assert.ok((await query('SELECT * FROM telegram_connections WHERE user_id=1')).rowCount)
+      assert.equal((await api('/account/telegram/connection',{method:'DELETE',token:session1})).status,200)
+      assert.equal((await query('SELECT * FROM telegram_connections WHERE user_id=1')).rowCount,0)
+      const discord=await post('/discord/connect-code',{clientId:'new-discord'},session1)
+      assert.equal(discord.status,200)
+      assert.equal((await query(`SELECT user_id FROM discord_connect_codes WHERE client_id='new-discord'`)).rows[0].user_id,1)
+      assert.equal((await api('/account/discord/connection',{method:'DELETE',token:session1})).status,200)
+    })
     await t.test('account-scoped revocation and expiration are enforced immediately', async () => {
       const listing = await api('/api/desktop/credentials', { token: session1 })
       assert.equal(listing.status, 200)
