@@ -73,7 +73,13 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
       } else if (['youtube','tiktok','instagram'].includes(provider)) {
         try {
           const profile = await bridge(provider, 'describe', {}, accountToken)
-          if (!profile.connected) { item.ready=false; item.reason='Reconecte esta plataforma em Connections.' }
+          if (!profile.connected) { item.ready=false; item.reason=({
+            instagram_expired:'A conexão do Instagram expirou. Reconecte em Connections.',
+            instagram_token_invalid:'O Instagram recusou o token. Reconecte em Connections.',
+            instagram_permission:'O Instagram não autorizou a consulta desta conta. Confira as permissões do aplicativo Meta.',
+            instagram_profile_unavailable:'O Instagram não retornou o perfil. Tente novamente ou confira a configuração do aplicativo Meta.',
+            instagram_identity_mismatch:'O identificador salvo do Instagram não corresponde ao perfil. Reconecte após a atualização da 1CE.'
+          })[profile.reasonCode] || 'Reconecte esta plataforma em Connections.' }
           else { item.name = profile.name || item.name; item.note=profile.note || null }
         } catch { item.ready=false; item.reason='Conexão ou serviço de publicação indisponível. Confira Connections.' }
       }
