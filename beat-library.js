@@ -1,6 +1,5 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import {once} from 'node:events'
 const chunkSize=1024*1024
 export async function setupBeatLibrary(db){
  await db.query(`CREATE TABLE IF NOT EXISTS account_beats(id UUID PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,title TEXT NOT NULL,audio_hash TEXT NOT NULL,audio_size INTEGER NOT NULL,duration DOUBLE PRECISION,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(user_id,audio_hash))`)
@@ -57,7 +56,10 @@ export function registerBeatLibrary(router,{db,account}){
     const chunk=await db.query('SELECT data FROM account_beat_audio WHERE beat_id=$1 AND chunk_index=$2',[req.params.id,index])
     if(!chunk.rowCount)throw Error('Missing audio chunk')
     const bytes=Buffer.from(chunk.rows[0].data),offset=index*chunkSize
-    if(!res.write(bytes.subarray(Math.max(0,start-offset),Math.min(bytes.length,end-offset+1))))await Promise.race([once(res,'drain'),once(res,'close')])
+    if(!res.write(bytes.subarray(Math.max(0,start-offset),Math.min(bytes.length,end-offset+1))))await new Promise(resolve=>{
+     const done=()=>{res.off('drain',done);res.off('close',done);resolve()}
+     res.once('drain',done);res.once('close',done)
+    })
    }
    res.end()
   }catch(error){if(res.headersSent)res.destroy(error);else next(error)}

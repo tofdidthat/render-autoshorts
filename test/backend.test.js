@@ -282,6 +282,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       const id=uploaded.data.renderId
       const created=await post('/api/desktop/publication',{renderId:id,title:'Review beat'},credential.access_token)
       assert.equal(created.status,201,JSON.stringify(created.data))
+      assert.equal((await api('/api/desktop/beats',{token:session1})).data.beats.find(beat=>beat.id===uploaded.data.beat.id).title,'Review beat')
       const ticket=created.data.ticket
       const login=await post('/api/desktop/publication-login',{ticket})
       assert.equal(login.status,200)
