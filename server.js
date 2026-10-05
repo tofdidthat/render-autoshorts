@@ -3683,11 +3683,12 @@ async function upsertStripeSubscription({
   status,
   priceId = null,
   currentPeriodEnd = null,
-  cancelAtPeriodEnd = false
+  cancelAtPeriodEnd = false,
+  queryClient = db
 }) {
   if (!userId) return
 
-  await db.query(
+  await queryClient.query(
     `
       INSERT INTO stripe_subscriptions (
         user_id,
@@ -3724,10 +3725,10 @@ async function upsertStripeSubscription({
   )
 }
 
-async function findStripeUserIdBySubscription(subscriptionId) {
+async function findStripeUserIdBySubscription(subscriptionId, queryClient = db) {
   if (!subscriptionId) return null
 
-  const result = await db.query(
+  const result = await queryClient.query(
     `SELECT user_id FROM stripe_subscriptions WHERE stripe_subscription_id = $1 LIMIT 1`,
     [String(subscriptionId)]
   )
@@ -3777,7 +3778,8 @@ app.post('/stripe/webhook', async (req, res) => {
           userId,
           customerId: object.customer,
           subscriptionId: object.subscription,
-          status: object.payment_status === 'paid' ? 'active' : 'incomplete'
+          status: object.payment_status === 'paid' ? 'active' : 'incomplete',
+          queryClient: client
         })
       }
     }
@@ -3789,7 +3791,7 @@ app.post('/stripe/webhook', async (req, res) => {
     ) {
       const userId =
         object.metadata?.onece_user_id ||
-        await findStripeUserIdBySubscription(object.id)
+        await findStripeUserIdBySubscription(object.id, client)
 
       if (userId) {
         await upsertStripeSubscription({
@@ -3801,7 +3803,8 @@ app.post('/stripe/webhook', async (req, res) => {
             : object.status,
           priceId: object.items?.data?.[0]?.price?.id || null,
           currentPeriodEnd: object.current_period_end || null,
-          cancelAtPeriodEnd: object.cancel_at_period_end || false
+          cancelAtPeriodEnd: object.cancel_at_period_end || false,
+          queryClient: client
         })
       }
     }
@@ -3812,14 +3815,15 @@ app.post('/stripe/webhook', async (req, res) => {
           ? object.subscription
           : object.subscription?.id
 
-      const userId = await findStripeUserIdBySubscription(subscriptionId)
+      const userId = await findStripeUserIdBySubscription(subscriptionId, client)
 
       if (userId) {
         await upsertStripeSubscription({
           userId,
           customerId: object.customer,
           subscriptionId,
-          status: 'past_due'
+          status: 'past_due',
+          queryClient: client
         })
       }
     }
