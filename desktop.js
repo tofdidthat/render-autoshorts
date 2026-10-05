@@ -1,4 +1,5 @@
 import express from 'express'
+import {setupBeatLibrary,saveDesktopBeat,registerBeatLibrary} from './beat-library.js'
 import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -12,6 +13,7 @@ const validUserCode = value => /^[A-F0-9]{8}$/.test(value)
 const ttl = 600
 
 export async function setupDesktopDatabase(db) {
+  await setupBeatLibrary(db)
   await db.query(`CREATE TABLE IF NOT EXISTS desktop_authorizations (
     device_code_hash TEXT PRIMARY KEY,
     user_code TEXT UNIQUE NOT NULL,
@@ -214,6 +216,7 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     await db.query('DELETE FROM instagram_connections WHERE user_id=$1',[req.account.id])
     res.json({disconnected:true})
   })
+  registerBeatLibrary(router,{db,account})
   router.post('/upload', desktop, (req, res, next) => {
     if (activeUploads.has(req.desktop.user_id)) return res.status(429).json({ error: 'Upload already in progress.' })
     activeUploads.add(req.desktop.user_id)
@@ -242,8 +245,10 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
           }
         }
         const render = await renderAudio({ audio, cover, ownerUserId: req.desktop.user_id })
+        const beat=await saveDesktopBeat(db,req.desktop.user_id,audio,audioInfo.format?.duration)
+        render.beatId=beat.id
         res.status(201).json({ ok: true, renderId: render.id, size: render.size,
-          mimeType: render.mimeType, expiresInSeconds: ttl, published: false })
+          mimeType: render.mimeType, expiresInSeconds: ttl, published: false, beat })
       } catch (error) {
         if (error instanceof SyntaxError || error.cmd?.includes('ffprobe')) {
           res.status(400).json({ error: 'Invalid media.' })
@@ -269,6 +274,8 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     if (typeof title!=='string' || !title.trim() || title.trim().length>100 || typeof renderId!=='string' || !/^[a-f0-9-]{36}$/.test(renderId)) return res.sendStatus(400)
     const result=await publicationService.create({renderId,title:title.trim(),userId:req.desktop.user_id,credentialId:req.desktop.id})
     if (!result) return res.status(409).json({error:'Render expired or already prepared for publication.'})
+    const render=renders.get(renderId)
+    if(render?.beatId)await db.query('UPDATE account_beats SET title=$1 WHERE id=$2 AND user_id=$3',[title.trim(),render.beatId,req.desktop.user_id])
     res.status(201).json(result)
   })
   router.get('/publications/:id', desktop, async(req,res)=> {

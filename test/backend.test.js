@@ -207,6 +207,22 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       }
       assert.equal((await api(`/render/${desktopRender}`, { method: 'DELETE' })).status, 404)
     })
+    await t.test('desktop MP3 is saved privately beyond the temporary render',async()=>{
+      const list=await api('/api/desktop/beats',{token:session1})
+      assert.equal(list.status,200)
+      assert.equal(list.data.beats.length,1)
+      const beat=list.data.beats[0]
+      assert.equal((await api('/api/desktop/beats')).status,401)
+      assert.equal((await api('/api/desktop/beats',{token:session2})).data.beats.length,0)
+      assert.equal((await api('/api/desktop/beats/'+beat.id+'/audio',{token:session2})).status,404)
+      const download=await api('/api/desktop/beats/'+beat.id+'/audio',{token:session1})
+      assert.equal(download.status,200)
+      assert.deepEqual(download.bytes,fs.readFileSync(audio))
+      const rename=await api('/api/desktop/beats/'+beat.id,{method:'PATCH',token:session1,body:{title:'Saved Friday'}})
+      assert.equal(rename.status,200)
+      assert.equal((await api('/api/desktop/beats/'+beat.id,{method:'PATCH',token:session2,body:{title:'Stolen'}})).status,404)
+      assert.equal((await api('/api/desktop/beats',{token:session1})).data.beats[0].title,'Saved Friday')
+    })
     await t.test('cover works; malformed and mislabeled audio rejected without retaining render', async () => {
       const good = await api('/api/desktop/upload', { method: 'POST', token: credential.access_token, form: form(true) })
       assert.equal(good.status, 201, JSON.stringify(good.data))
