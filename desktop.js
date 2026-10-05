@@ -1,6 +1,7 @@
 import express from 'express'
 import {setupBeatLibrary,saveDesktopBeat,registerBeatLibrary} from './beat-library.js'
 import {validateStemsZip} from './stems-zip.js'
+import {registerReviewCover} from './review-cover.js'
 import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -218,6 +219,7 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     res.json({disconnected:true})
   })
   registerBeatLibrary(router,{db,account})
+  registerReviewCover(router,{account,limited,publicationService,renders,renderAudio,execFileAsync,deleteFile})
   router.post('/upload', desktop, (req, res, next) => {
     if (activeUploads.has(req.desktop.user_id)) return res.status(429).json({ error: 'Upload already in progress.' })
     activeUploads.add(req.desktop.user_id)
@@ -298,6 +300,8 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
     const accountToken=req.headers.authorization.slice(7).trim()
     res.json({requestId:row.id,account:{email:req.account.email,name:req.account.name},title:row.title,
       status:row.status,results:row.results,
+      hasCover:Boolean(renders.get(row.render_id)?.hasCover),
+      canChooseCover:row.status==='pending' && renders.get(row.render_id)?.coverEditable===true,
       connections:row.status==='pending' ? await publicationService.connections(req.account.id,accountToken) : []})
   })
   router.post('/publication-login',limited,async(req,res)=> {
@@ -404,3 +408,4 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
   })
   return router
 }
+

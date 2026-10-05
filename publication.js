@@ -168,12 +168,15 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
     const selected=metadata.targets.map(target=>available.find(item=>item.provider===target.provider && item.ready && item.fingerprint===target.fingerprint))
     if (selected.some(item=>!item)) return false
     const render=renders.get(row.render_id)
-    if (!render || render.ownerUserId!==row.user_id || Date.now()-render.createdAt>=600000 || !fs.existsSync(render.path)) return false
-    const claimed=await db.query(`UPDATE desktop_publications SET status='processing',title=$1,description=$2,targets=$3
+    if (!render || render.reviewEditing || render.reviewConfirming || render.ownerUserId!==row.user_id || Date.now()-render.createdAt>=600000 || !fs.existsSync(render.path)) return false
+    render.reviewConfirming=true
+    let claimed
+    try { claimed=await db.query(`UPDATE desktop_publications SET status='processing',title=$1,description=$2,targets=$3
       WHERE id=$4 AND user_id=$5 AND status='pending' AND expires_at>NOW()
       AND EXISTS (SELECT 1 FROM desktop_credentials c WHERE c.id=desktop_publications.credential_id
         AND c.revoked_at IS NULL AND c.expires_at>NOW()) RETURNING id`,
     [metadata.title,metadata.description,JSON.stringify(metadata.targets),row.id,row.user_id])
+    } finally {delete render.reviewConfirming}
     if (!claimed.rowCount) return false
     running.add(row.id)
     render.publicationBusyUntil=Date.now()+30*60000
