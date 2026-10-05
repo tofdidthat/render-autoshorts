@@ -1,3 +1,4 @@
+import {zipFixture,wav} from './stems-fixtures.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -222,6 +223,29 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       assert.equal(rename.status,200)
       assert.equal((await api('/api/desktop/beats/'+beat.id,{method:'PATCH',token:session2,body:{title:'Stolen'}})).status,404)
       assert.equal((await api('/api/desktop/beats',{token:session1})).data.beats[0].title,'Saved Friday')
+    })
+    await t.test('stems attach to the beat, remain private and survive render deletion',async()=>{
+      const archive=zipFixture([['stems - Friday/Kick.wav',wav()],['stems - Friday/Bass.wav',wav()]])
+      const data=form()
+      data.append('stems',new Blob([archive],{type:'application/zip'}),'stems - Friday.zip')
+      const uploaded=await api('/api/desktop/upload',{method:'POST',token:credential.access_token,form:data})
+      assert.equal(uploaded.status,201,JSON.stringify(uploaded.data))
+      const beat=uploaded.data.beat
+      assert.equal(beat.stems_name,'stems - Friday.zip')
+      assert.equal(beat.stems_size,archive.length)
+      assert.equal((await api('/api/desktop/beats/'+beat.id+'/stems')).status,401)
+      assert.equal((await api('/api/desktop/beats/'+beat.id+'/stems',{token:session2})).status,404)
+      assert.equal((await api('/api/desktop/renders/'+uploaded.data.renderId,{method:'DELETE',token:credential.access_token})).status,204)
+      const saved=await api('/api/desktop/beats/'+beat.id+'/stems',{token:session1})
+      assert.equal(saved.status,200);assert.deepEqual(saved.bytes,archive)
+      assert.equal(saved.headers.get('content-type'),'application/zip')
+      assert.ok(saved.headers.get('content-disposition').includes('stems%20-%20Friday.zip'))
+      const again=await api('/api/desktop/upload',{method:'POST',token:credential.access_token,form:form()})
+      assert.equal(again.status,201);assert.equal(again.data.beat.id,beat.id)
+      assert.deepEqual((await api('/api/desktop/beats/'+beat.id+'/stems',{token:session1})).bytes,archive)
+      const invalid=form();invalid.append('stems',new Blob(['not zip']),'stems.zip')
+      assert.equal((await api('/api/desktop/upload',{method:'POST',token:credential.access_token,form:invalid})).status,400)
+      assert.deepEqual((await api('/api/desktop/beats/'+beat.id+'/stems',{token:session1})).bytes,archive)
     })
     await t.test('cover works; malformed and mislabeled audio rejected without retaining render', async () => {
       const good = await api('/api/desktop/upload', { method: 'POST', token: credential.access_token, form: form(true) })

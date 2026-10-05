@@ -1,5 +1,6 @@
 import express from 'express'
 import {setupBeatLibrary,saveDesktopBeat,registerBeatLibrary} from './beat-library.js'
+import {validateStemsZip} from './stems-zip.js'
 import multer from 'multer'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -87,8 +88,8 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
   const attempts = new Map()
   const activeUploads = new Set()
   const multipart = multer({
-    storage: multer.diskStorage({}), limits: { fileSize: 200 * 1024 * 1024, files: 2, fields: 0, parts: 2 }
-  }).fields([{ name: 'audio', maxCount: 1 }, { name: 'cover', maxCount: 1 }])
+    storage: multer.diskStorage({}), limits: { fileSize: 500 * 1024 * 1024, files: 3, fields: 0, parts: 3 }
+  }).fields([{ name: 'audio', maxCount: 1 }, { name: 'cover', maxCount: 1 }, { name: 'stems', maxCount: 1 }])
   router.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
     res.setHeader('Referrer-Policy', 'no-referrer')
@@ -227,6 +228,9 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
       try {
         const audio = req.files?.audio?.[0]
         const cover = req.files?.cover?.[0]
+        const stems=req.files?.stems?.[0]
+        if((audio?.size || 0)>200*1024*1024 || (cover?.size || 0)>200*1024*1024)return res.status(413).json({error:'MP3 and cover must each be at most 200 MB.'})
+        if(stems){try{await validateStemsZip(stems)}catch(error){return res.status(400).json({error:'Invalid stems ZIP: '+error.message})}}
         if (!audio) return res.status(400).json({ error: 'MP3 audio is required.' })
         // Inspect actual media rather than trusting filename or MIME supplied by the desktop.
         const probe = async file => JSON.parse((await execFileAsync('ffprobe', [
@@ -245,7 +249,7 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
           }
         }
         const render = await renderAudio({ audio, cover, ownerUserId: req.desktop.user_id })
-        const beat=await saveDesktopBeat(db,req.desktop.user_id,audio,audioInfo.format?.duration)
+        const beat=await saveDesktopBeat(db,req.desktop.user_id,audio,audioInfo.format?.duration,stems)
         render.beatId=beat.id
         res.status(201).json({ ok: true, renderId: render.id, size: render.size,
           mimeType: render.mimeType, expiresInSeconds: ttl, published: false, beat })

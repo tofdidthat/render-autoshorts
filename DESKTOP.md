@@ -56,3 +56,10 @@ Legacy `/render` still requires cover + audio and streams MP4 with `X-Render-Id`
 ## Validation
 
 Run `npm ci` followed by `npm test` (Node 22). Development dependencies provide an embedded PostgreSQL engine (PGlite) and real ffmpeg/ffprobe binaries; production dependencies stay unchanged. Tests exercise the real Express server and SQL schema, proof/consent/replay protection, Google browser binding and callback routing (provider responses mocked), media validation, black frame pixels, 9:16 dimensions and audio codec, embedded MP3 artwork, private render boundaries, revocation, and both `/prepare-video` paths. No live platform publication, Google OAuth round trip or production database mutation is part of the local suite. The GitHub workflow runs the suite on Linux for pushes to main and pull requests.
+
+## Saved stems
+Desktop uploads may include a third multipart file, `stems`, alongside `audio` and optional `cover`. The ZIP is limited to 500 MB compressed, 2 GB expanded and 2,048 entries; it must contain WAV audio only. Validation reads each entry without extracting it, checks WAV headers and CRC, and rejects unsafe paths, links, encrypted entries and damaged archives.
+
+Audio and stems are committed together to the owner's account. Duplicate audio is deduplicated per account; supplying a new ZIP replaces the attached stems atomically, while an audio-only retry preserves existing stems. Account-authenticated `GET /api/desktop/beats` includes `stems_name` and `stems_size`. `GET /api/desktop/beats/:id/stems` downloads the owner's ZIP, supports ranges and returns 404 to other accounts. Downloads use a repeatable-read snapshot so a concurrent ZIP replacement cannot mix versions. Neither asset depends on temporary renders or publication confirmation.
+
+Windows 2.3.1 exports `stems - [FLP basename]` and `stems - [FLP basename].zip`. Only that project-specific ZIP is attached automatically; legacy generic `stems.zip` files are left untouched. The update changes scripts while retaining the existing native context-menu package and desktop credential.
