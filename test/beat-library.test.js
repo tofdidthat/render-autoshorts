@@ -43,8 +43,19 @@ test('durable audio: ownership, deduplication, ranges and rollback',async()=>{
   const failing={...db,connect:async()=>({release(){},query:async(sql,params)=>{if(sql.startsWith('INSERT INTO account_beat_audio'))throw Error('disk failure');return query(sql,params)}})}
   await assert.rejects(saveDesktopBeat(failing,1,{path:file,originalname:'Fail.mp3'},1),/disk failure/)
   assert.equal((await query('SELECT COUNT(*)::int AS count FROM account_beats WHERE user_id=1')).rows[0].count,1)
+  await query('INSERT INTO account_beat_stems(beat_id,chunk_index,data) VALUES($1,0,$2)',[beat.id,Buffer.from('private ZIP')])
+  const remove=owner=>fetch(origin+'/beats/'+beat.id,{method:'DELETE',headers:{Authorization:String(owner)}})
+  assert.equal((await remove(0)).status,401)
+  assert.equal((await remove(2)).status,404)
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM account_beat_audio WHERE beat_id=$1',[beat.id])).rows[0].count,3)
+  assert.equal((await remove(1)).status,204)
+  for(const table of ['account_beat_audio','account_beat_stems'])assert.equal((await query('SELECT COUNT(*)::int AS count FROM '+table+' WHERE beat_id=$1',[beat.id])).rows[0].count,0)
+  assert.equal((await get('/beats/'+beat.id+'/audio')).status,404)
+  assert.equal((await remove(1)).status,404)
+  assert.equal((await (await get('/beats',2)).json()).beats.length,1)
  }finally{
   if(server)await new Promise(resolve=>server.close(resolve))
   await pg.close();await fs.rm(file,{force:true});await fs.rmdir(dir)
  }
 })
+

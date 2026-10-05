@@ -50,6 +50,14 @@ export function audioRange(header,size){
 }
 export function registerBeatLibrary(router,{db,account}){
  router.get('/beats',account,async(req,res,next)=>{try{const result=await db.query('SELECT id,title,created_at,duration,audio_size,stems_name,stems_size FROM account_beats WHERE user_id=$1 ORDER BY created_at DESC,id',[req.account.id]);res.json({beats:result.rows})}catch(error){next(error)}})
+ router.delete('/beats/:id',account,async(req,res,next)=>{
+  try{
+   if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(req.params.id))return res.sendStatus(404)
+   // Foreign keys remove the corresponding audio and stems in the same statement.
+   const result=await db.query('DELETE FROM account_beats WHERE id=$1 AND user_id=$2 RETURNING id',[req.params.id,req.account.id])
+   res.sendStatus(result.rowCount?204:404)
+  }catch(error){next(error)}
+ })
  router.patch('/beats/:id',account,async(req,res,next)=>{
   try{
    if(!/^[a-f0-9-]{36}$/i.test(req.params.id))return res.sendStatus(404)
@@ -99,3 +107,4 @@ export function registerBeatLibrary(router,{db,account}){
   }
  }
 }
+
