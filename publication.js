@@ -55,38 +55,164 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
       : `${connection.guild_id}:${connection.channel_id}`
     return hash(`${provider}:${connection.id}:${identity}`)
   }
-  async function connections(userId, accountToken) {
-    const list = []
-    for (const provider of publicationProviders) {
-      const connection = await getConnection(provider, userId)
-      if (!connection) { list.push({ provider, ready: false, reasonCode:'not_connected', reason: 'Conecte novamente esta plataforma em Connections para vincular a conta 1CE.' }); continue }
-      const item = { provider, ready: true, fingerprint: fingerprint(provider, connection),
-        reasonCode:'ready',
-        name: provider === 'telegram' ? `${connection.chat_title || connection.chat_id}${connection.thread_id ? ' / tópico '+connection.thread_id : ''}`
-          : provider === 'discord' ? `${connection.guild_name || connection.guild_id} / ${connection.channel_name || connection.channel_id}`
-          : provider === 'instagram' ? connection.username || connection.instagram_user_id
-          : provider === 'tiktok' ? connection.open_id : 'Canal YouTube conectado à conta 1CE',
-        visibility: provider === 'tiktok' ? 'Caixa de entrada: concluir publicação no TikTok'
-          : provider === 'instagram' ? 'Reel na conta selecionada'
-          : provider === 'telegram' || provider === 'discord' ? 'Membros do chat/canal selecionado' : 'Público' }
-      if (provider === 'telegram' && !process.env.TELEGRAM_BOT_TOKEN || provider === 'discord' && !process.env.DISCORD_BOT_TOKEN) {
-        item.ready = false; item.reasonCode='bot_not_configured'; item.reason = 'Bot não configurado no Railway.'
-      } else if (['youtube','tiktok','instagram'].includes(provider)) {
-        try {
-          const profile = await bridge(provider, 'describe', {}, accountToken)
-          if (!profile.connected) { item.ready=false; item.reasonCode=profile.reasonCode || 'token_invalid'; item.reason=({
-            instagram_expired:'A conexão do Instagram expirou. Reconecte em Connections.',
-            instagram_token_invalid:'O Instagram recusou o token. Reconecte em Connections.',
-            instagram_permission:'O Instagram não autorizou a consulta desta conta. Confira as permissões do aplicativo Meta.',
-            instagram_profile_unavailable:'O Instagram não retornou o perfil. Tente novamente ou confira a configuração do aplicativo Meta.',
-            instagram_identity_mismatch:'O identificador salvo do Instagram não corresponde ao perfil. Reconecte após a atualização da 1CE.'
-          })[profile.reasonCode] || 'Reconecte esta plataforma em Connections.' }
-          else { item.name = profile.name || item.name; item.note=profile.note || null }
-        } catch { item.ready=false; item.reasonCode='service_unavailable'; item.reason='Conexão ou serviço de publicação indisponível. Confira Connections.' }
+  async function mapWithConcurrency(items, limit, worker) {
+    const results = new Array(items.length)
+    let nextIndex = 0
+
+    async function run() {
+      while (true) {
+        const index = nextIndex
+        nextIndex += 1
+
+        if (index >= items.length) {
+          return
+        }
+
+        results[index] =
+          await worker(items[index], index)
       }
-      list.push(item)
     }
-    return list
+
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(
+            limit,
+            items.length
+          )
+        },
+        () => run()
+      )
+    )
+
+    return results
+  }
+
+  async function connections(userId, accountToken) {
+    return mapWithConcurrency(
+      publicationProviders,
+      3,
+      async provider => {
+        const connection =
+          await getConnection(
+            provider,
+            userId
+          )
+
+        if (!connection) {
+          return {
+            provider,
+            ready: false,
+            reasonCode: 'not_connected',
+            reason:
+              'Conecte novamente esta plataforma em Connections para vincular a conta 1CE.'
+          }
+        }
+
+        const item = {
+          provider,
+          ready: true,
+          fingerprint:
+            fingerprint(
+              provider,
+              connection
+            ),
+          reasonCode: 'ready',
+          name:
+            provider === 'telegram'
+              ? `${connection.chat_title || connection.chat_id}${connection.thread_id ? ' / tópico ' + connection.thread_id : ''}`
+              : provider === 'discord'
+                ? `${connection.guild_name || connection.guild_id} / ${connection.channel_name || connection.channel_id}`
+                : provider === 'instagram'
+                  ? connection.username ||
+                    connection.instagram_user_id
+                  : provider === 'tiktok'
+                    ? connection.open_id
+                    : 'Canal YouTube conectado à conta 1CE',
+          visibility:
+            provider === 'tiktok'
+              ? 'Caixa de entrada: concluir publicação no TikTok'
+              : provider === 'instagram'
+                ? 'Reel na conta selecionada'
+                : provider === 'telegram' ||
+                    provider === 'discord'
+                  ? 'Membros do chat/canal selecionado'
+                  : 'Público'
+        }
+
+        if (
+          (
+            provider === 'telegram' &&
+            !process.env.TELEGRAM_BOT_TOKEN
+          ) ||
+          (
+            provider === 'discord' &&
+            !process.env.DISCORD_BOT_TOKEN
+          )
+        ) {
+          item.ready = false
+          item.reasonCode =
+            'bot_not_configured'
+          item.reason =
+            'Bot não configurado no Railway.'
+
+          return item
+        }
+
+        if (
+          ['youtube', 'tiktok', 'instagram']
+            .includes(provider)
+        ) {
+          try {
+            const profile =
+              await bridge(
+                provider,
+                'describe',
+                {},
+                accountToken
+              )
+
+            if (!profile.connected) {
+              item.ready = false
+              item.reasonCode =
+                profile.reasonCode ||
+                'token_invalid'
+
+              item.reason =
+                ({
+                  instagram_expired:
+                    'A conexão do Instagram expirou. Reconecte em Connections.',
+                  instagram_token_invalid:
+                    'O Instagram recusou o token. Reconecte em Connections.',
+                  instagram_permission:
+                    'O Instagram não autorizou a consulta desta conta. Confira as permissões do aplicativo Meta.',
+                  instagram_profile_unavailable:
+                    'O Instagram não retornou o perfil. Tente novamente ou confira a configuração do aplicativo Meta.',
+                  instagram_identity_mismatch:
+                    'O identificador salvo do Instagram não corresponde ao perfil. Reconecte após a atualização da 1CE.'
+                })[profile.reasonCode] ||
+                'Reconecte esta plataforma em Connections.'
+            } else {
+              item.name =
+                profile.name ||
+                item.name
+
+              item.note =
+                profile.note ||
+                null
+            }
+          } catch {
+            item.ready = false
+            item.reasonCode =
+              'service_unavailable'
+            item.reason =
+              'Conexão ou serviço de publicação indisponível. Confira Connections.'
+          }
+        }
+
+        return item
+      }
+    )
   }
   async function create({ renderId, title, userId, credentialId }) {
     const render = renders.get(renderId)
