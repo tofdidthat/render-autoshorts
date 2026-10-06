@@ -273,14 +273,14 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         '-frames:v', '1', '-vf', 'scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { encoding: 'buffer' })).stdout
       assert.ok([...pixel].every(value => value <= 2))
     })
-    await t.test('legacy /render and /prepare-video still return MP4 and render header', async () => {
+    await t.test('authenticated /render and /prepare-video return MP4 while stored renders stay private', async () => {
       assert.equal((await api('/render', { method: 'POST', token: session1, form: form() })).status, 400)
       const rendered = await api('/render', { method: 'POST', token: session1, form: form(true) })
       assert.equal(rendered.status, 200)
       assert.match(rendered.headers.get('content-type'), /video\/mp4/)
       const legacyId = rendered.headers.get('x-render-id')
-      assert.equal((await api(`/render/${legacyId}`)).status, 200)
-      assert.equal((await api(`/public-render/${legacyId}.mp4`)).status, 200)
+      assert.equal((await api(`/render/${legacyId}`)).status, 404)
+      assert.equal((await api(`/public-render/${legacyId}.mp4`)).status, 404)
       for (const replaceAudio of [false, true]) {
         const data = new FormData()
         data.append('video', new Blob([rendered.bytes], { type: 'video/mp4' }), 'video.mp4')
@@ -289,7 +289,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         assert.equal(prepared.status, 200, prepared.data.toString())
         assert.ok(prepared.headers.get('x-render-id'))
       }
-      assert.equal((await api(`/render/${legacyId}`, { method: 'DELETE' })).status, 200)
+      assert.equal((await api(`/render/${legacyId}`, { method: 'DELETE' })).status, 404)
     })
     await t.test('five-platform publication requires account consent, stays private and runs once', async () => {
       process.env.ONECE_INTERNAL_SECRET='internal-test'
