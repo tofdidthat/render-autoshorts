@@ -10,9 +10,6 @@ import { PGlite } from '@electric-sql/pglite'
 import ffmpeg from 'ffmpeg-static'
 import ffprobe from 'ffprobe-static'
 import { app, db, renders, setupDatabase, deleteRender } from '../server.js'
-import { startDesktopGoogle, consumeDesktopGoogle } from '../desktop.js'
-import {publicationRedirectScript} from '../publication-page.js'
-import vm from 'node:vm'
 
 const run = promisify(execFile)
 const sha = value => crypto.createHash('sha256').update(value).digest('hex')
