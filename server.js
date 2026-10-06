@@ -17,6 +17,7 @@ import {
   retrieveStripeSubscription,
   retrieveStripePrice
 } from './stripe.js'
+import { createHealthRouter } from './routes/health-routes.js'
 
 const { Pool } = pg
 
@@ -249,39 +250,6 @@ function validateTikTokUploadUrl(uploadUrl) {
   return parsed.toString()
 }
 
-app.get('/', (req, res) => {
-  const ready =
-    desktopDatabaseReady === true
-
-  return res
-    .status(ready ? 200 : 503)
-    .json({
-      ok: ready,
-      ready,
-      service: 'AutoShorts Render',
-      temporaryRenders: renders.size
-    })
-})
-
-app.get('/health/live', (req, res) => {
-  return res.json({
-    ok: true,
-    service: 'AutoShorts Render'
-  })
-})
-
-app.get('/health/ready', (req, res) => {
-  const ready =
-    desktopDatabaseReady === true
-
-  return res
-    .status(ready ? 200 : 503)
-    .json({
-      ok: ready,
-      ready
-    })
-})
-
 const desktopHandlers = {}
 const publicationService = createPublicationService({ db, renders, handlers: desktopHandlers,
   backendUrl: () => process.env.BACKEND_PUBLIC_URL, frontendUrl: () => process.env.ONECE_FRONTEND_URL || 'https://1ce.lol' })
@@ -344,6 +312,15 @@ async function withRenderCapacity(userId, task) {
   }
 }
 let desktopDatabaseReady = false
+
+app.use(
+  createHealthRouter({
+    ready: () =>
+      desktopDatabaseReady,
+    renders
+  })
+)
+
 
 // Account-owned social links can be disconnected without affecting other accounts.
 for (const provider of ['telegram','discord']) {
