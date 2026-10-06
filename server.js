@@ -3594,6 +3594,28 @@ function googleVerifierChallenge(value) {
     .digest('base64url')
 }
 
+function getRequestCookie(req, name) {
+  const raw =
+    String(req.headers.cookie || '')
+
+  for (const part of raw.split(';')) {
+    const index = part.indexOf('=')
+
+    if (index === -1) continue
+
+    const key =
+      part.slice(0, index).trim()
+
+    if (key !== name) continue
+
+    return decodeURIComponent(
+      part.slice(index + 1).trim()
+    )
+  }
+
+  return ''
+}
+
 app.post('/account/google/exchange', async (req, res) => {
   const loginCode =
     String(req.body?.loginCode || '').trim()
@@ -3828,7 +3850,10 @@ app.get(
 
       if (!desktopState) {
         const cookieState =
-          String(req.cookies?.onece_google_login_state || '')
+          getRequestCookie(
+            req,
+            'onece_google_login_state'
+          )
 
         if (
           !receivedState ||
