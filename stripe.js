@@ -114,6 +114,16 @@ export async function createStripeCheckoutSession({
   )
 }
 
+export async function retrieveStripePrice(priceId) {
+  if (!priceId) {
+    throw new Error('Stripe price não encontrado.')
+  }
+
+  return stripeGet(
+    `/prices/${encodeURIComponent(String(priceId))}`
+  )
+}
+
 export async function retrieveStripeSubscription(subscriptionId) {
   if (!subscriptionId) {
     throw new Error('Stripe subscription não encontrada.')
