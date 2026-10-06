@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url'
 import { setupPublicationDatabase, createPublicationService } from './publication.js'
 import {
   createStripeCheckoutSession,
-  createStripeBillingPortalSession
+  createStripeBillingPortalSession,
+  retrieveStripeSubscription
 } from './stripe.js'
 
 const { Pool } = pg
@@ -4616,12 +4617,97 @@ async function upsertStripeSubscription({
   customerId,
   subscriptionId,
   status,
-  priceId = null,
-  currentPeriodEnd = null,
-  cancelAtPeriodEnd = false,
+  priceId,
+  currentPeriodEnd,
+  cancelAtPeriodEnd,
   queryClient = db
 }) {
-  if (!userId) return
+  if (!userId) return { updated: false }
+
+  const existingResult =
+    await queryClient.query(
+      `
+        SELECT
+          stripe_customer_id,
+          stripe_subscription_id,
+          status,
+          price_id,
+          current_period_end,
+          cancel_at_period_end
+        FROM stripe_subscriptions
+        WHERE user_id = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [Number(userId)]
+    )
+
+  const existing =
+    existingResult.rows[0] || null
+
+  if (
+    existing?.stripe_subscription_id &&
+    subscriptionId &&
+    existing.stripe_subscription_id !== String(subscriptionId)
+  ) {
+    const existingStatus =
+      String(existing.status || '').toLowerCase()
+
+    const terminal =
+      ['canceled', 'incomplete_expired'].includes(existingStatus)
+
+    if (!terminal) {
+      console.warn(
+        'Ignoring Stripe event for non-canonical subscription',
+        {
+          userId: Number(userId),
+          currentSubscription:
+            existing.stripe_subscription_id,
+          incomingSubscription:
+            String(subscriptionId)
+        }
+      )
+
+      return {
+        updated: false,
+        ignoredDifferentSubscription: true
+      }
+    }
+  }
+
+  const nextCustomerId =
+    customerId != null
+      ? String(customerId)
+      : existing?.stripe_customer_id || null
+
+  const nextSubscriptionId =
+    subscriptionId != null
+      ? String(subscriptionId)
+      : existing?.stripe_subscription_id || null
+
+  const nextStatus =
+    status != null
+      ? String(status)
+      : existing?.status || 'inactive'
+
+  const nextPriceId =
+    priceId !== undefined && priceId !== null
+      ? String(priceId)
+      : existing?.price_id || null
+
+  const nextCurrentPeriodEnd =
+    currentPeriodEnd !== undefined
+      ? (
+          currentPeriodEnd
+            ? new Date(Number(currentPeriodEnd) * 1000)
+            : null
+        )
+      : existing?.current_period_end || null
+
+  const nextCancelAtPeriodEnd =
+    typeof cancelAtPeriodEnd === 'boolean'
+      ? cancelAtPeriodEnd
+      : Boolean(existing?.cancel_at_period_end)
 
   await queryClient.query(
     `
@@ -4638,26 +4724,55 @@ async function upsertStripeSubscription({
       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       ON CONFLICT (user_id)
       DO UPDATE SET
-        stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, stripe_subscriptions.stripe_customer_id),
-        stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, stripe_subscriptions.stripe_subscription_id),
+        stripe_customer_id = EXCLUDED.stripe_customer_id,
+        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
         status = EXCLUDED.status,
-        price_id = COALESCE(EXCLUDED.price_id, stripe_subscriptions.price_id),
+        price_id = EXCLUDED.price_id,
         current_period_end = EXCLUDED.current_period_end,
         cancel_at_period_end = EXCLUDED.cancel_at_period_end,
         updated_at = NOW()
     `,
     [
       Number(userId),
-      customerId ? String(customerId) : null,
-      subscriptionId ? String(subscriptionId) : null,
-      String(status || 'inactive'),
-      priceId ? String(priceId) : null,
-      currentPeriodEnd
-        ? new Date(Number(currentPeriodEnd) * 1000)
-        : null,
-      Boolean(cancelAtPeriodEnd)
+      nextCustomerId,
+      nextSubscriptionId,
+      nextStatus,
+      nextPriceId,
+      nextCurrentPeriodEnd,
+      nextCancelAtPeriodEnd
     ]
   )
+
+  return { updated: true }
+}
+
+async function syncStripeSubscription({
+  userId,
+  subscriptionId,
+  queryClient = db
+}) {
+  if (!userId || !subscriptionId) {
+    return { updated: false }
+  }
+
+  const subscription =
+    await retrieveStripeSubscription(
+      subscriptionId
+    )
+
+  return upsertStripeSubscription({
+    userId,
+    customerId: subscription.customer,
+    subscriptionId: subscription.id,
+    status: subscription.status,
+    priceId:
+      subscription.items?.data?.[0]?.price?.id,
+    currentPeriodEnd:
+      subscription.current_period_end,
+    cancelAtPeriodEnd:
+      subscription.cancel_at_period_end,
+    queryClient
+  })
 }
 
 async function findStripeUserIdBySubscription(subscriptionId, queryClient = db) {
@@ -4706,14 +4821,14 @@ app.post('/stripe/webhook', async (req, res) => {
     const object = event.data?.object || {}
 
     if (event.type === 'checkout.session.completed') {
-      const userId = object.client_reference_id || object.metadata?.onece_user_id
+      const userId =
+        object.client_reference_id ||
+        object.metadata?.onece_user_id
 
       if (userId && object.subscription) {
-        await upsertStripeSubscription({
+        await syncStripeSubscription({
           userId,
-          customerId: object.customer,
           subscriptionId: object.subscription,
-          status: object.payment_status === 'paid' ? 'active' : 'incomplete',
           queryClient: client
         })
       }
@@ -4726,19 +4841,15 @@ app.post('/stripe/webhook', async (req, res) => {
     ) {
       const userId =
         object.metadata?.onece_user_id ||
-        await findStripeUserIdBySubscription(object.id, client)
+        await findStripeUserIdBySubscription(
+          object.id,
+          client
+        )
 
       if (userId) {
-        await upsertStripeSubscription({
+        await syncStripeSubscription({
           userId,
-          customerId: object.customer,
           subscriptionId: object.id,
-          status: event.type === 'customer.subscription.deleted'
-            ? 'canceled'
-            : object.status,
-          priceId: object.items?.data?.[0]?.price?.id || null,
-          currentPeriodEnd: object.current_period_end || null,
-          cancelAtPeriodEnd: object.cancel_at_period_end || false,
           queryClient: client
         })
       }
@@ -4750,14 +4861,16 @@ app.post('/stripe/webhook', async (req, res) => {
           ? object.subscription
           : object.subscription?.id
 
-      const userId = await findStripeUserIdBySubscription(subscriptionId, client)
+      const userId =
+        await findStripeUserIdBySubscription(
+          subscriptionId,
+          client
+        )
 
       if (userId) {
-        await upsertStripeSubscription({
+        await syncStripeSubscription({
           userId,
-          customerId: object.customer,
           subscriptionId,
-          status: 'past_due',
           queryClient: client
         })
       }
