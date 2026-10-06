@@ -296,7 +296,50 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
       return {state:'uploaded',message:`Vídeo enviado ao YouTube (${metadata.youtubePrivacy}). Processamento da plataforma pode continuar.`,
         id:String(sent.video.id),url:'https://www.youtube.com/watch?v='+encodeURIComponent(sent.video.id)}
     }
-    return {state:'uploaded',message:'Enviado à caixa de entrada do TikTok. Abra o aplicativo para concluir a publicação.',id:String(start.publishId)}
+
+    const publishId=String(start.publishId || '')
+    if (!publishId) throw new Error('TikTok publish ID missing')
+
+    for (let attempt=0; attempt<20; attempt++) {
+      const statusResult=await bridge(
+        'tiktok',
+        'status',
+        {publishId},
+        accountToken
+      )
+
+      const status=
+        statusResult?.data?.status || ''
+
+      if (status==='SEND_TO_USER_INBOX') {
+        return {
+          state:'delivered',
+          message:'Entregue à caixa de entrada do TikTok. Abra o aplicativo para concluir a publicação.',
+          id:publishId,
+          platformStatus:status
+        }
+      }
+
+      if (status==='FAILED') {
+        return {
+          state:'failed',
+          message:
+            statusResult?.data?.fail_reason ||
+            'O TikTok rejeitou o processamento do vídeo.',
+          id:publishId,
+          platformStatus:status
+        }
+      }
+
+      await new Promise(resolve=>setTimeout(resolve,3000))
+    }
+
+    return {
+      state:'processing',
+      message:'Arquivo enviado ao TikTok e ainda em processamento.',
+      id:publishId,
+      platformStatus:'PROCESSING'
+    }
   }
   async function confirm(row, metadata, accountToken) {
     metadata={...metadata,youtubePrivacy:'public'}
