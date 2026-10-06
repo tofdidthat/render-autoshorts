@@ -47,29 +47,6 @@ function validateTikTokUploadUrl(uploadUrl) {
   return parsed.toString()
 }
 
-const desktopHandlers = {}
-const publicationService = createPublicationService({ db, renders, handlers: desktopHandlers,
-  backendUrl: () => process.env.BACKEND_PUBLIC_URL, frontendUrl: () => process.env.ONECE_FRONTEND_URL || 'https://1ce.lol' })
-
-const renderAudio = createRenderService({
-  execFileAsync, renders, scheduleRenderCleanup, deleteFile
-})
-
-const MAX_GLOBAL_RENDER_JOBS =
-  Math.max(
-    1,
-    Number(process.env.MAX_GLOBAL_RENDER_JOBS || 2)
-  )
-
-const MAX_USER_RENDER_JOBS =
-  Math.max(
-    1,
-    Number(process.env.MAX_USER_RENDER_JOBS || 1)
-  )
-
-let activeRenderJobs = 0
-const activeRenderJobsByUser = new Map()
-
 router.post(
   '/upload-tiktok',
 
