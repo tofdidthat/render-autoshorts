@@ -397,6 +397,245 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         assert.deepEqual(sends,{youtube:1,tiktok:1,instagram:1,telegram:2,discord:1})
       } finally {globalThis.fetch=originalFetch}
     })
+    await t.test('Stripe webhook reconciles current state and ignores stale or foreign subscription events', async () => {
+      process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test'
+      process.env.STRIPE_SECRET_KEY = 'sk_test'
+
+      await query(`
+        INSERT INTO stripe_subscriptions (
+          user_id,
+          stripe_customer_id,
+          stripe_subscription_id,
+          status,
+          price_id,
+          current_period_end,
+          cancel_at_period_end
+        )
+        VALUES (
+          1,
+          'cus_1',
+          'sub_new',
+          'active',
+          'price_new',
+          to_timestamp(2000000000),
+          TRUE
+        )
+        ON CONFLICT (user_id)
+        DO UPDATE SET
+          stripe_customer_id = EXCLUDED.stripe_customer_id,
+          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+          status = EXCLUDED.status,
+          price_id = EXCLUDED.price_id,
+          current_period_end = EXCLUDED.current_period_end,
+          cancel_at_period_end = EXCLUDED.cancel_at_period_end
+      `)
+
+      const stripeSubscriptions = {
+        sub_new: {
+          id: 'sub_new',
+          customer: 'cus_1',
+          status: 'active',
+          current_period_end: 2000000000,
+          cancel_at_period_end: true,
+          items: {
+            data: [
+              { price: { id: 'price_new' } }
+            ]
+          }
+        },
+        sub_old: {
+          id: 'sub_old',
+          customer: 'cus_1',
+          status: 'active',
+          current_period_end: 1900000000,
+          cancel_at_period_end: false,
+          items: {
+            data: [
+              { price: { id: 'price_old' } }
+            ]
+          }
+        }
+      }
+
+      const originalFetch = globalThis.fetch
+
+      globalThis.fetch = async (url, opts) => {
+        const value = String(url)
+
+        if (
+          value.startsWith(
+            'https://api.stripe.com/v1/subscriptions/'
+          )
+        ) {
+          const id =
+            decodeURIComponent(
+              value.split('/').pop()
+            )
+
+          const subscription =
+            stripeSubscriptions[id]
+
+          return subscription
+            ? Response.json(subscription)
+            : Response.json(
+                { error: { message: 'Not found' } },
+                { status: 404 }
+              )
+        }
+
+        return originalFetch(url, opts)
+      }
+
+      async function sendStripeEvent(event) {
+        const body = JSON.stringify(event)
+        const timestamp =
+          Math.floor(Date.now() / 1000)
+
+        const signature =
+          crypto
+            .createHmac(
+              'sha256',
+              process.env.STRIPE_WEBHOOK_SECRET
+            )
+            .update(`${timestamp}.${body}`)
+            .digest('hex')
+
+        const response =
+          await originalFetch(
+            origin + '/stripe/webhook',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type':
+                  'application/json',
+                'Stripe-Signature':
+                  `t=${timestamp},v1=${signature}`
+              },
+              body
+            }
+          )
+
+        return {
+          status: response.status,
+          data:
+            await response.json()
+              .catch(() => ({}))
+        }
+      }
+
+      try {
+        const stalePartial = {
+          id: 'evt_stale_current',
+          type: 'customer.subscription.updated',
+          data: {
+            object: {
+              id: 'sub_new',
+              customer: 'cus_1',
+              status: 'past_due',
+              metadata: {
+                onece_user_id: '1'
+              }
+            }
+          }
+        }
+
+        const first =
+          await sendStripeEvent(stalePartial)
+
+        assert.equal(first.status, 200)
+
+        let stored =
+          (
+            await query(
+              `
+                SELECT
+                  stripe_subscription_id,
+                  status,
+                  price_id,
+                  EXTRACT(EPOCH FROM current_period_end)::bigint AS current_period_end,
+                  cancel_at_period_end
+                FROM stripe_subscriptions
+                WHERE user_id = 1
+              `
+            )
+          ).rows[0]
+
+        assert.equal(
+          stored.stripe_subscription_id,
+          'sub_new'
+        )
+        assert.equal(stored.status, 'active')
+        assert.equal(stored.price_id, 'price_new')
+        assert.equal(
+          Number(stored.current_period_end),
+          2000000000
+        )
+        assert.equal(
+          stored.cancel_at_period_end,
+          true
+        )
+
+        const duplicate =
+          await sendStripeEvent(stalePartial)
+
+        assert.equal(duplicate.status, 200)
+        assert.equal(
+          duplicate.data.duplicate,
+          true
+        )
+
+        const oldSubscriptionEvent = {
+          id: 'evt_old_subscription',
+          type: 'customer.subscription.updated',
+          data: {
+            object: {
+              id: 'sub_old',
+              customer: 'cus_1',
+              status: 'active',
+              metadata: {
+                onece_user_id: '1'
+              }
+            }
+          }
+        }
+
+        const oldResult =
+          await sendStripeEvent(
+            oldSubscriptionEvent
+          )
+
+        assert.equal(oldResult.status, 200)
+
+        stored =
+          (
+            await query(
+              `
+                SELECT
+                  stripe_subscription_id,
+                  status,
+                  price_id,
+                  cancel_at_period_end
+                FROM stripe_subscriptions
+                WHERE user_id = 1
+              `
+            )
+          ).rows[0]
+
+        assert.equal(
+          stored.stripe_subscription_id,
+          'sub_new'
+        )
+        assert.equal(stored.status, 'active')
+        assert.equal(stored.price_id, 'price_new')
+        assert.equal(
+          stored.cancel_at_period_end,
+          true
+        )
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
     await t.test('bot connections bind account codes, reject forged webhook and disconnect only the owner', async () => {
       assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:credential.access_token})).status,401)
       assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:session2})).status,200)
