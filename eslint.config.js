@@ -12,13 +12,20 @@ export default [
       ecmaVersion: 'latest',
       sourceType: 'module',
       globals: {
+        AbortSignal: 'readonly',
+        Blob: 'readonly',
         Buffer: 'readonly',
+        FormData: 'readonly',
+        Response: 'readonly',
         URL: 'readonly',
+        URLSearchParams: 'readonly',
+        crypto: 'readonly',
         console: 'readonly',
         fetch: 'readonly',
         process: 'readonly',
         setInterval: 'readonly',
-        setTimeout: 'readonly'
+        setTimeout: 'readonly',
+        structuredClone: 'readonly'
       }
     },
     rules: {
