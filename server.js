@@ -256,8 +256,6 @@ async function withRenderCapacity(userId, task) {
     }
   }
 }
-let databaseSetup.isReady() = false
-
 app.use(
   createHealthRouter({
     ready: () =>
