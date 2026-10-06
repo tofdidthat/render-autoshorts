@@ -23,6 +23,7 @@ import { createAccountRouter } from './routes/account-routes.js'
 import { createGoogleAuthRouter } from './routes/google-auth-routes.js'
 import { createPlatformConnectionRouter } from './routes/platform-connection-routes.js'
 import { createTelegramRouter } from './routes/telegram-routes.js'
+import { createDiscordRouter, registerDiscordCommands } from './routes/discord-routes.js'
 
 const { Pool } = pg
 
@@ -254,16 +255,6 @@ app.use(
 
 
 // Account-owned social links can be disconnected without affecting other accounts.
-app.delete('/account/discord/connection', async(req,res)=> {
-  try {
-    const account=await getAccountFromRequest(req)
-    if(!account)return res.status(401).json({error:'Invalid 1CE session.'})
-    await db.query('DELETE FROM discord_connections WHERE user_id=$1',[account.id])
-    await db.query('DELETE FROM discord_connect_codes WHERE user_id=$1',[account.id])
-    return res.json({disconnected:true})
-  }catch{return res.status(500).json({error:'Could not disconnect platform.'})}
-})
-
 // Desktop renders stay private and cannot enter legacy publication routes.
 app.use((req, res, next) => {
   if (req.path.toLowerCase().startsWith('/api/desktop/')) return next()
@@ -697,70 +688,21 @@ app.use(
   })
 )
 
+app.use(
+  createDiscordRouter({
+    db,
+    getAccountFromRequest,
+    renders,
+    execFileAsync,
+    deleteFile,
+    desktopHandlers
+  })
+)
+
 // ============================================================
 // DISCORD CONNECT
 // Gera código temporário para conectar um canal
 // ============================================================
-
-app.post('/discord/connect-code', async (req, res) => {
-  try {
-    const {
-      clientId
-    } = req.body || {}
-
-    if (!clientId) {
-      return res.status(400).json({
-        error: 'clientId não informado.'
-      })
-    }
-
-    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
-    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
-    const code =
-      crypto
-        .randomBytes(4)
-        .toString('hex')
-        .toUpperCase()
-
-    await db.query(
-      `
-        INSERT INTO discord_connect_codes (
-          code,
-          client_id,
-          user_id,
-          expires_at
-        )
-        VALUES (
-          $1,
-          $2,
-          $3,
-          NOW() + INTERVAL '10 minutes'
-        )
-      `,
-      [
-        code,
-        String(clientId),
-        account?.id || null
-      ]
-    )
-
-    return res.json({
-      ok: true,
-      code
-    })
-
-  } catch (error) {
-    console.error(
-      'Discord connect code error:',
-      error
-    )
-
-    return res.status(500).json({
-      error:
-        'Unable to create Discord connection code.'
-    })
-  }
-})
 
 // ============================================================
 // DISCORD CONNECTION STATUS
