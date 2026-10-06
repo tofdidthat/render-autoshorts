@@ -51,11 +51,6 @@ function verifyStripeWebhookSignature(req) {
   })
 }
 
-function stripePlanFromStatus(status) {
-  return ['active', 'trialing'].includes(String(status || '').toLowerCase())
-    ? 'pro'
-    : 'free'
-}
 
 async function upsertStripeSubscription({
   userId,
