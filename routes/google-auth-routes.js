@@ -11,11 +11,13 @@ export function createGoogleAuthRouter({
   publicationService,
   isDesktopReady,
   frontendUrl,
-  fetcher = fetch
+  fetcher = (...args) =>
+    globalThis.fetch(...args)
 }) {
   const router = Router()
 
-  const fetch = fetcher
+  const fetch = (...args) =>
+    fetcher(...args)
 
 function hashGoogleLoginValue(value) {
   return crypto
@@ -302,7 +304,7 @@ router.get(
           )
         ) {
           return res.redirect(
-            `${frontendUrl}/app?login=error`
+            `${frontendUrl()}/app?login=error`
           )
         }
 
@@ -323,7 +325,7 @@ router.get(
 
         if (!normalLoginAttempt) {
           return res.redirect(
-            `${frontendUrl}/app?login=error`
+            `${frontendUrl()}/app?login=error`
           )
         }
       }
@@ -333,7 +335,7 @@ router.get(
 
       if (!code) {
         return res.redirect(
-          `${frontendUrl}/app?login=error`
+          `${frontendUrl()}/app?login=error`
         )
       }
 
@@ -686,7 +688,7 @@ router.get(
       )
 
       res.redirect(
-        `${frontendUrl}/app?login_code=${encodeURIComponent(loginCode)}`
+        `${frontendUrl()}/app?login_code=${encodeURIComponent(loginCode)}`
       )
 
     } catch (error) {
@@ -696,7 +698,7 @@ router.get(
       )
 
       res.redirect(
-        `${frontendUrl}/app?login=error`
+        `${frontendUrl()}/app?login=error`
       )
     }
   }
