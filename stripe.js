@@ -15,14 +15,17 @@ function getStripeSecretKey() {
   return key
 }
 
-async function stripePost(path, params) {
+async function stripePost(path, params, { idempotencyKey = null } = {}) {
   const response = await fetch(
     `${STRIPE_API_URL}${path}`,
     {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${getStripeSecretKey()}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        ...(idempotencyKey
+          ? { 'Idempotency-Key': idempotencyKey }
+          : {})
       },
       body: params.toString()
     }
@@ -43,7 +46,9 @@ async function stripePost(path, params) {
 export async function createStripeCheckoutSession({
   market,
   customerEmail,
-  userId
+  customerId,
+  userId,
+  idempotencyKey
 }) {
   const priceId = STRIPE_PRICES[market]
 
@@ -65,7 +70,9 @@ export async function createStripeCheckoutSession({
   params.set('cancel_url', market === 'br' ? `${frontendUrl}/pt/pricing` : `${frontendUrl}/pricing`)
   params.set('allow_promotion_codes', 'true')
 
-  if (customerEmail) {
+  if (customerId) {
+    params.set('customer', String(customerId))
+  } else if (customerEmail) {
     params.set('customer_email', customerEmail)
   }
 
@@ -78,7 +85,11 @@ export async function createStripeCheckoutSession({
   params.set('metadata[onece_market]', market)
   params.set('subscription_data[metadata][onece_market]', market)
 
-  return stripePost('/checkout/sessions', params)
+  return stripePost(
+    '/checkout/sessions',
+    params,
+    { idempotencyKey }
+  )
 }
 
 export async function createStripeBillingPortalSession({
