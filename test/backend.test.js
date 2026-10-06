@@ -648,11 +648,23 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       assert.equal(issued.status,200,JSON.stringify(issued.data))
       const code=(await query(`SELECT code FROM telegram_connect_codes WHERE client_id='new-client'`)).rows[0].code
       assert.equal((await query(`SELECT user_id FROM telegram_connect_codes WHERE code=$1`,[code])).rows[0].user_id,1)
-      const message={message:{text:'/connect '+code,chat:{id:-555,title:'Owner chat'}}}
+      const message={message:{text:'/connect '+code,from:{id:42},chat:{id:-555,title:'Owner chat',type:'supergroup'}}}
       assert.equal((await post('/telegram/webhook',message)).status,401)
       const original=globalThis.fetch
-      globalThis.fetch=async(url,opts)=>String(url).startsWith('https://api.telegram.org/')?Response.json({ok:true}):original(url,opts)
+      let telegramMemberStatus='member'
+      globalThis.fetch=async(url,opts)=>{
+        const value=String(url)
+        if(value.includes('/getChatMember'))return Response.json({ok:true,result:{status:telegramMemberStatus}})
+        if(value.startsWith('https://api.telegram.org/'))return Response.json({ok:true})
+        return original(url,opts)
+      }
       try{
+        const denied=await fetch(origin+'/telegram/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-telegram-bot-api-secret-token':'test-webhook'},body:JSON.stringify(message)})
+        assert.equal(denied.status,200)
+        assert.equal((await query(`SELECT used_at FROM telegram_connect_codes WHERE code=$1`,[code])).rows[0].used_at,null)
+        assert.equal((await query(`SELECT * FROM telegram_connections WHERE chat_id='-555'`)).rowCount,0)
+
+        telegramMemberStatus='administrator'
         const linked=await fetch(origin+'/telegram/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-telegram-bot-api-secret-token':'test-webhook'},body:JSON.stringify(message)})
         assert.equal(linked.status,200)
         assert.equal((await query(`SELECT user_id FROM telegram_connections WHERE chat_id='-555'`)).rows[0].user_id,1)
@@ -665,6 +677,42 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       const discord=await post('/discord/connect-code',{clientId:'new-discord'},session1)
       assert.equal(discord.status,200)
       assert.equal((await query(`SELECT user_id FROM discord_connect_codes WHERE client_id='new-discord'`)).rows[0].user_id,1)
+
+      const discordCode=(await query(`SELECT code FROM discord_connect_codes WHERE client_id='new-discord'`)).rows[0].code
+      const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519')
+      const publicDer=publicKey.export({format:'der',type:'spki'})
+      process.env.DISCORD_PUBLIC_KEY=publicDer.subarray(publicDer.length-32).toString('hex')
+
+      async function discordInteraction(permissions){
+        const payload=JSON.stringify({
+          type:2,
+          guild_id:'guild-1',
+          channel_id:'channel-1',
+          guild:{name:'Guild'},
+          channel:{name:'general'},
+          member:{permissions:String(permissions)},
+          data:{name:'connect',options:[{name:'code',value:discordCode}]}
+        })
+        const timestamp=String(Math.floor(Date.now()/1000))
+        const signature=crypto.sign(null,Buffer.concat([Buffer.from(timestamp),Buffer.from(payload)]),privateKey).toString('hex')
+        const response=await fetch(origin+'/discord/interactions',{method:'POST',headers:{
+          'Content-Type':'application/json',
+          'x-signature-ed25519':signature,
+          'x-signature-timestamp':timestamp
+        },body:payload})
+        return {status:response.status,data:await response.json()}
+      }
+
+      const deniedDiscord=await discordInteraction(0)
+      assert.equal(deniedDiscord.status,200)
+      assert.match(deniedDiscord.data.data.content,/Only a server administrator/)
+      assert.equal((await query(`SELECT used_at FROM discord_connect_codes WHERE code=$1`,[discordCode])).rows[0].used_at,null)
+
+      const linkedDiscord=await discordInteraction(32)
+      assert.equal(linkedDiscord.status,200)
+      assert.match(linkedDiscord.data.data.content,/Connected to 1CE/)
+      assert.equal((await query(`SELECT user_id FROM discord_connections WHERE channel_id='channel-1'`)).rows[0].user_id,1)
+
       assert.equal((await api('/account/discord/connection',{method:'DELETE',token:session1})).status,200)
     })
     await t.test('account-scoped revocation and expiration are enforced immediately', async () => {
