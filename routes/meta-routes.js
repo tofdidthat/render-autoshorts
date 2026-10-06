@@ -235,26 +235,5 @@ router.get(
 // DESCONECTAR INSTAGRAM
 // ------------------------------------------------------------
 
-export {
-  app,
-  db,
-  renders,
-  setupDatabase,
-  deleteRender
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  app.listen(
-    port,
-    '0.0.0.0',
-
-    () => {
-      console.log(
-        `Render server listening on port ${port}`
-      )
-    }
-  )
-
-
   return router
 }
