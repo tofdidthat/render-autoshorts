@@ -53,14 +53,6 @@ async function getAccountFromRequest(req) {
 }
 
 
-app.use(
-  createPlatformConnectionRouter({
-    db,
-    getAccountFromRequest,
-    isValidInternalRequest
-  })
-)
-
 // ------------------------------------------------------------
 // EMAIL / PASSWORD AUTH
 // Cadastro + verificação por código enviado pelo Resend
