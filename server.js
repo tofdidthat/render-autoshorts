@@ -3580,6 +3580,124 @@ app.post('/account/email/login', async (req, res) => {
 })
 
 
+function hashGoogleLoginValue(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value || ''))
+    .digest('hex')
+}
+
+function googleVerifierChallenge(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value || ''))
+    .digest('base64url')
+}
+
+app.post('/account/google/exchange', async (req, res) => {
+  const loginCode =
+    String(req.body?.loginCode || '').trim()
+
+  const verifier =
+    String(req.body?.verifier || '').trim()
+
+  if (
+    !/^[A-Za-z0-9_-]{43}$/.test(loginCode) ||
+    !/^[A-Za-z0-9_-]{43}$/.test(verifier)
+  ) {
+    return res.status(400).json({
+      error: 'Invalid Google login exchange.'
+    })
+  }
+
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+
+    const result = await client.query(
+      `
+        SELECT
+          user_id,
+          verifier_challenge
+        FROM account_google_login_attempts
+        WHERE exchange_hash = $1
+          AND user_id IS NOT NULL
+          AND callback_used_at IS NOT NULL
+          AND exchanged_at IS NULL
+          AND exchange_expires_at > NOW()
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [hashGoogleLoginValue(loginCode)]
+    )
+
+    const attempt = result.rows[0]
+
+    if (
+      !attempt ||
+      googleVerifierChallenge(verifier) !== attempt.verifier_challenge
+    ) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Google login exchange expired or invalid.'
+      })
+    }
+
+    const sessionToken =
+      createAccountSessionToken()
+
+    const tokenHash =
+      hashAccountSessionToken(sessionToken)
+
+    await client.query(
+      `
+        INSERT INTO account_sessions (
+          user_id,
+          token_hash,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          NOW() + INTERVAL '30 days'
+        )
+      `,
+      [
+        attempt.user_id,
+        tokenHash
+      ]
+    )
+
+    await client.query(
+      `
+        UPDATE account_google_login_attempts
+        SET exchanged_at = NOW()
+        WHERE exchange_hash = $1
+      `,
+      [hashGoogleLoginValue(loginCode)]
+    )
+
+    await client.query('COMMIT')
+
+    return res.json({
+      ok: true,
+      session: sessionToken
+    })
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+
+    console.error('Google login exchange error:', error)
+
+    return res.status(500).json({
+      error: 'Unable to complete Google login.'
+    })
+  } finally {
+    client.release()
+  }
+})
+
 // ------------------------------------------------------------
 // INICIA LOGIN GOOGLE
 // ------------------------------------------------------------
@@ -3600,11 +3718,64 @@ app.get(
       })
     }
 
-    let state = crypto.randomBytes(24).toString('hex')
-    if (req.query.desktop_user_code !== undefined || req.query.desktop_publication !== undefined) {
+    let state
+
+    if (
+      req.query.desktop_user_code !== undefined ||
+      req.query.desktop_publication !== undefined
+    ) {
       if (!desktopDatabaseReady) return res.sendStatus(503)
-      try { state = await startDesktopGoogle(req, res, db) }
-      catch { return res.status(400).json({ error: 'Invalid desktop authorization.' }) }
+
+      try {
+        state = await startDesktopGoogle(req, res, db)
+      } catch {
+        return res.status(400).json({
+          error: 'Invalid desktop authorization.'
+        })
+      }
+    } else {
+      const verifierChallenge =
+        String(req.query.challenge || '').trim()
+
+      if (!/^[A-Za-z0-9_-]{43}$/.test(verifierChallenge)) {
+        return res.status(400).json({
+          error: 'Invalid Google login challenge.'
+        })
+      }
+
+      state =
+        crypto.randomBytes(32).toString('base64url')
+
+      await db.query(
+        `
+          INSERT INTO account_google_login_attempts (
+            state_hash,
+            verifier_challenge,
+            expires_at
+          )
+          VALUES (
+            $1,
+            $2,
+            NOW() + INTERVAL '10 minutes'
+          )
+        `,
+        [
+          hashGoogleLoginValue(state),
+          verifierChallenge
+        ]
+      )
+
+      res.cookie(
+        'onece_google_login_state',
+        state,
+        {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          maxAge: 10 * 60 * 1000,
+          path: '/account/google'
+        }
+      )
     }
 
     const params =
@@ -3642,8 +3813,59 @@ app.get(
 
   async (req, res) => {
     try {
-      const desktopState = String(req.query.state || '').startsWith('desktop_')
-      const desktopCode = desktopState ? await consumeDesktopGoogle(req, res, db) : null
+      const receivedState =
+        String(req.query.state || '')
+
+      const desktopState =
+        receivedState.startsWith('desktop_')
+
+      const desktopCode =
+        desktopState
+          ? await consumeDesktopGoogle(req, res, db)
+          : null
+
+      let normalLoginAttempt = null
+
+      if (!desktopState) {
+        const cookieState =
+          String(req.cookies?.onece_google_login_state || '')
+
+        if (
+          !receivedState ||
+          !cookieState ||
+          receivedState.length !== cookieState.length ||
+          !crypto.timingSafeEqual(
+            Buffer.from(receivedState),
+            Buffer.from(cookieState)
+          )
+        ) {
+          return res.redirect(
+            `${ONECE_FRONTEND_URL}/app?login=error`
+          )
+        }
+
+        const claimed = await db.query(
+          `
+            UPDATE account_google_login_attempts
+            SET callback_used_at = NOW()
+            WHERE state_hash = $1
+              AND callback_used_at IS NULL
+              AND expires_at > NOW()
+            RETURNING verifier_challenge
+          `,
+          [hashGoogleLoginValue(receivedState)]
+        )
+
+        normalLoginAttempt =
+          claimed.rows[0] || null
+
+        if (!normalLoginAttempt) {
+          return res.redirect(
+            `${ONECE_FRONTEND_URL}/app?login=error`
+          )
+        }
+      }
+
       const code =
         String(req.query.code || '')
 
@@ -3916,53 +4138,93 @@ app.get(
         client.release()
       }
 
-      // Cria sessão própria da 1CE
-      const sessionToken =
-        createAccountSessionToken()
+      if (desktopCode) {
+        // Desktop keeps its existing dedicated authorization flow.
+        const sessionToken =
+          createAccountSessionToken()
 
-      const tokenHash =
-        hashAccountSessionToken(
-          sessionToken
+        const tokenHash =
+          hashAccountSessionToken(
+            sessionToken
+          )
+
+        await db.query(
+          `
+            INSERT INTO account_sessions (
+              user_id,
+              token_hash,
+              expires_at
+            )
+            VALUES (
+              $1,
+              $2,
+              NOW() + INTERVAL '30 days'
+            )
+          `,
+          [
+            userId,
+            tokenHash
+          ]
         )
 
-      await db.query(
-        `
-          INSERT INTO account_sessions (
-            user_id,
-            token_hash,
-            expires_at
-          )
-          VALUES (
-            $1,
-            $2,
-            NOW() + INTERVAL '30 days'
-          )
-        `,
-        [
-          userId,
-          tokenHash
-        ]
-      )
-
-      if (desktopCode) {
         if (desktopCode.startsWith('publishapp:')) {
           return res.redirect(publicationService.reviewOrigin()+'/app?desktopPublication='+encodeURIComponent(desktopCode.slice(11))+
             '#session='+encodeURIComponent(sessionToken))
         }
+
         if (desktopCode.startsWith('publish:')) {
           return res.redirect('/api/desktop/publish?request='+encodeURIComponent(desktopCode.slice(8))+
             '#session='+encodeURIComponent(sessionToken))
         }
+
         return res.redirect(
           '/api/desktop/connect?user_code=' + encodeURIComponent(desktopCode) +
           '#session=' + encodeURIComponent(sessionToken)
         )
       }
 
-      // Token vai no fragmento (#), não na query string.
-      // O fragmento não é enviado ao servidor da Vercel.
+      const loginCode =
+        crypto.randomBytes(32).toString('base64url')
+
+      const exchangeResult =
+        await db.query(
+          `
+            UPDATE account_google_login_attempts
+            SET
+              user_id = $1,
+              exchange_hash = $2,
+              exchange_expires_at =
+                NOW() + INTERVAL '5 minutes'
+            WHERE state_hash = $3
+              AND callback_used_at IS NOT NULL
+              AND exchanged_at IS NULL
+            RETURNING state_hash
+          `,
+          [
+            userId,
+            hashGoogleLoginValue(loginCode),
+            hashGoogleLoginValue(receivedState)
+          ]
+        )
+
+      if (!exchangeResult.rowCount) {
+        throw new Error(
+          'Google login attempt could not be completed.'
+        )
+      }
+
+      res.clearCookie(
+        'onece_google_login_state',
+        {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          path: '/account/google'
+        }
+      )
+
       res.redirect(
-        `${ONECE_FRONTEND_URL}/app#session=${encodeURIComponent(sessionToken)}`
+        `${ONECE_FRONTEND_URL}/app?login_code=${encodeURIComponent(loginCode)}`
       )
 
     } catch (error) {
@@ -5698,6 +5960,27 @@ await db.query(`
     expires_at TIMESTAMPTZ
       NOT NULL
   )
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_google_login_attempts (
+    state_hash TEXT PRIMARY KEY,
+    verifier_challenge TEXT NOT NULL,
+    user_id INTEGER
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+    exchange_hash TEXT UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    callback_used_at TIMESTAMPTZ,
+    exchange_expires_at TIMESTAMPTZ,
+    exchanged_at TIMESTAMPTZ
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_google_login_attempts_expiry_idx
+  ON account_google_login_attempts(expires_at)
 `)
 
 await db.query(`
