@@ -3145,8 +3145,9 @@ app.use(
     publicationService,
     isDesktopReady: () =>
       desktopDatabaseReady,
-    frontendUrl:
-      ONECE_FRONTEND_URL
+    frontendUrl: () =>
+      process.env.ONECE_FRONTEND_URL ||
+      'https://1ce.app'
   })
 )
 
