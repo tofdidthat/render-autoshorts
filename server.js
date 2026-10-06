@@ -2566,6 +2566,277 @@ async function getAccountFromRequest(req) {
 }
 
 
+function hashOAuthTransactionId(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value || ''))
+    .digest('hex')
+}
+
+app.post('/account/oauth/start', async (req, res) => {
+  try {
+    const account = await getAccountFromRequest(req)
+
+    if (!account) {
+      return res.status(401).json({
+        error: 'Invalid 1CE session.'
+      })
+    }
+
+    const provider =
+      String(req.body?.provider || '').toLowerCase()
+
+    if (!['youtube', 'tiktok', 'instagram'].includes(provider)) {
+      return res.status(400).json({
+        error: 'Invalid OAuth provider.'
+      })
+    }
+
+    const transactionId =
+      crypto.randomBytes(32).toString('base64url')
+
+    const transactionHash =
+      hashOAuthTransactionId(transactionId)
+
+    await db.query(
+      `
+        INSERT INTO account_oauth_transactions (
+          transaction_hash,
+          user_id,
+          provider,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW() + INTERVAL '10 minutes'
+        )
+      `,
+      [
+        transactionHash,
+        account.id,
+        provider
+      ]
+    )
+
+    return res.json({
+      oauthId: transactionId
+    })
+  } catch (error) {
+    console.error('OAuth transaction start error:', error)
+
+    return res.status(500).json({
+      error: 'Unable to start OAuth connection.'
+    })
+  }
+})
+
+app.post('/account/oauth/complete', async (req, res) => {
+  if (!isValidInternalRequest(req)) {
+    return res.status(401).json({
+      error: 'Unauthorized internal request.'
+    })
+  }
+
+  const oauthId =
+    String(req.body?.oauthId || '').trim()
+
+  const provider =
+    String(req.body?.provider || '').toLowerCase()
+
+  const connection =
+    req.body?.connection || {}
+
+  if (
+    !oauthId ||
+    !['youtube', 'tiktok', 'instagram'].includes(provider) ||
+    !connection?.access_token
+  ) {
+    return res.status(400).json({
+      error: 'Invalid OAuth completion request.'
+    })
+  }
+
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+
+    const transactionResult =
+      await client.query(
+        `
+          SELECT user_id
+          FROM account_oauth_transactions
+          WHERE transaction_hash = $1
+            AND provider = $2
+            AND used_at IS NULL
+            AND expires_at > NOW()
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [
+          hashOAuthTransactionId(oauthId),
+          provider
+        ]
+      )
+
+    if (!transactionResult.rows.length) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'OAuth transaction expired or already used.'
+      })
+    }
+
+    const userId =
+      transactionResult.rows[0].user_id
+
+    if (provider === 'youtube') {
+      await client.query(
+        `
+          INSERT INTO youtube_connections (
+            user_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_type,
+            expires_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            access_token = EXCLUDED.access_token,
+            refresh_token = COALESCE(
+              EXCLUDED.refresh_token,
+              youtube_connections.refresh_token
+            ),
+            scope = EXCLUDED.scope,
+            token_type = EXCLUDED.token_type,
+            expires_at = EXCLUDED.expires_at,
+            updated_at = NOW()
+        `,
+        [
+          userId,
+          connection.access_token,
+          connection.refresh_token || null,
+          connection.scope || null,
+          connection.token_type || 'Bearer',
+          connection.expires_at || null
+        ]
+      )
+    }
+
+    if (provider === 'tiktok') {
+      await client.query(
+        `
+          INSERT INTO tiktok_connections (
+            user_id,
+            open_id,
+            access_token,
+            refresh_token,
+            scope,
+            token_type,
+            expires_at,
+            refresh_expires_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            open_id = EXCLUDED.open_id,
+            access_token = EXCLUDED.access_token,
+            refresh_token = COALESCE(
+              EXCLUDED.refresh_token,
+              tiktok_connections.refresh_token
+            ),
+            scope = EXCLUDED.scope,
+            token_type = EXCLUDED.token_type,
+            expires_at = EXCLUDED.expires_at,
+            refresh_expires_at = EXCLUDED.refresh_expires_at,
+            updated_at = NOW()
+        `,
+        [
+          userId,
+          connection.open_id || null,
+          connection.access_token,
+          connection.refresh_token || null,
+          connection.scope || null,
+          connection.token_type || 'Bearer',
+          connection.expires_at || null,
+          connection.refresh_expires_at || null
+        ]
+      )
+    }
+
+    if (provider === 'instagram') {
+      await client.query(
+        `
+          INSERT INTO instagram_connections (
+            user_id,
+            instagram_user_id,
+            page_id,
+            page_name,
+            username,
+            access_token,
+            token_type,
+            expires_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            instagram_user_id = EXCLUDED.instagram_user_id,
+            page_id = EXCLUDED.page_id,
+            page_name = EXCLUDED.page_name,
+            username = EXCLUDED.username,
+            access_token = EXCLUDED.access_token,
+            token_type = EXCLUDED.token_type,
+            expires_at = EXCLUDED.expires_at,
+            updated_at = NOW()
+        `,
+        [
+          userId,
+          connection.instagram_user_id || null,
+          connection.page_id || null,
+          connection.page_name || null,
+          connection.username || null,
+          connection.access_token,
+          connection.token_type || 'Bearer',
+          connection.expires_at || null
+        ]
+      )
+    }
+
+    await client.query(
+      `
+        UPDATE account_oauth_transactions
+        SET used_at = NOW()
+        WHERE transaction_hash = $1
+      `,
+      [hashOAuthTransactionId(oauthId)]
+    )
+
+    await client.query('COMMIT')
+
+    return res.json({
+      connected: true
+    })
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+
+    console.error('OAuth transaction completion error:', error)
+
+    return res.status(500).json({
+      error: 'Unable to complete OAuth connection.'
+    })
+  } finally {
+    client.release()
+  }
+})
+
+
 // ------------------------------------------------------------
 // EMAIL / PASSWORD AUTH
 // Cadastro + verificação por código enviado pelo Resend
@@ -5427,6 +5698,29 @@ await db.query(`
     expires_at TIMESTAMPTZ
       NOT NULL
   )
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_oauth_transactions (
+    transaction_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL
+      REFERENCES account_users(id)
+      ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_oauth_transactions_user_idx
+  ON account_oauth_transactions(user_id)
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_oauth_transactions_expiry_idx
+  ON account_oauth_transactions(expires_at)
 `)
 
 await db.query(`
