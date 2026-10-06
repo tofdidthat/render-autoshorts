@@ -5004,11 +5004,87 @@ app.post(
         })
       }
 
+      const subscriptionResult =
+        await db.query(
+          `
+            SELECT
+              stripe_customer_id,
+              stripe_subscription_id,
+              status
+            FROM stripe_subscriptions
+            WHERE user_id = $1
+            LIMIT 1
+          `,
+          [user.id]
+        )
+
+      const existingSubscription =
+        subscriptionResult.rows[0] || null
+
+      const existingStatus =
+        String(existingSubscription?.status || '')
+          .toLowerCase()
+
+      const hasExistingSubscription =
+        Boolean(
+          existingSubscription?.stripe_subscription_id &&
+          ![
+            'canceled',
+            'incomplete_expired'
+          ].includes(existingStatus)
+        )
+
+      if (hasExistingSubscription) {
+        const customerId =
+          existingSubscription?.stripe_customer_id
+
+        if (!customerId) {
+          return res.status(409).json({
+            error:
+              'An existing subscription was found, but its Stripe customer is unavailable.'
+          })
+        }
+
+        const portalSession =
+          await createStripeBillingPortalSession({
+            customerId
+          })
+
+        if (!portalSession?.url) {
+          throw new Error(
+            'Stripe Billing Portal session returned without URL.'
+          )
+        }
+
+        return res.json({
+          url: portalSession.url,
+          portal: true
+        })
+      }
+
+      const customerId =
+        existingSubscription?.stripe_customer_id || null
+
+      const idempotencyKey =
+        crypto
+          .createHash('sha256')
+          .update(
+            [
+              'onece-checkout',
+              user.id,
+              market,
+              customerId || user.email || ''
+            ].join(':')
+          )
+          .digest('hex')
+
       const session =
         await createStripeCheckoutSession({
           market,
           customerEmail: user.email,
-          userId: user.id
+          customerId,
+          userId: user.id,
+          idempotencyKey
         })
 
       if (!session?.url) {
