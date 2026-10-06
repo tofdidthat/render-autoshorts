@@ -292,7 +292,34 @@ export function createDesktopRouter({ db, getAccountFromRequest, renderAudio, re
   })
   router.get('/connections', limited, account, async(req,res)=> {
     const accountToken=req.headers.authorization.slice(7).trim()
-    res.json({connections:await publicationService.connections(req.account.id,accountToken)})
+    const provider =
+      typeof req.query?.provider === 'string'
+        ? req.query.provider.trim().toLowerCase()
+        : ''
+
+    const providers =
+      provider
+        ? [provider]
+        : undefined
+
+    if (
+      provider &&
+      !['youtube','tiktok','instagram','telegram','discord']
+        .includes(provider)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid provider.'
+      })
+    }
+
+    res.json({
+      connections:
+        await publicationService.connections(
+          req.account.id,
+          accountToken,
+          providers
+        )
+    })
   })
   router.post('/publish-review', limited, account, async(req,res)=> {
     const row=await publicationService.lookup(req.body?.ticket,req.account.id)
