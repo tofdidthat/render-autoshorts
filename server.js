@@ -1539,8 +1539,7 @@ app.post(
   renderId,
   title,
   description,
-  audioFileName,
-  clientId
+  audioFileName
 } = req.body || {}
     let imagePath = null
     let audioPath = null
@@ -1552,30 +1551,35 @@ app.post(
         })
       }
 
-      if (!clientId && !req.publicationConnection) {
-        return res.status(400).json({
-          error: 'clientId não informado.'
-        })
-      }
+      let connectionResult
 
-      // -------------------------------------------------------
-      // Busca o Telegram conectado a este usuário
-      // -------------------------------------------------------
+      if (req.publicationConnection) {
+        connectionResult = {
+          rows: [req.publicationConnection]
+        }
+      } else {
+        const account = await getAccountFromRequest(req)
 
-      const connectionResult =
-        req.publicationConnection ? { rows: [req.publicationConnection] } : await db.query(
+        if (!account) {
+          return res.status(401).json({
+            error: 'Invalid 1CE session.'
+          })
+        }
+
+        connectionResult = await db.query(
           `
             SELECT
               chat_id,
               thread_id,
               chat_title
             FROM telegram_connections
-            WHERE client_id = $1
+            WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT 1
           `,
-          [String(clientId)]
+          [account.id]
         )
+      }
 
       if (!connectionResult.rows.length) {
         return res.status(404).json({
@@ -2137,8 +2141,7 @@ app.post('/publish-discord', desktopHandlers.discord = async (req, res) => {
     renderId,
     title,
     description,
-    audioFileName,
-    clientId
+    audioFileName
   } = req.body || {}
 
   let imagePath = null
@@ -2148,12 +2151,6 @@ app.post('/publish-discord', desktopHandlers.discord = async (req, res) => {
     if (!renderId) {
       return res.status(400).json({
         error: 'renderId não informado.'
-      })
-    }
-
-    if (!clientId && !req.publicationConnection) {
-      return res.status(400).json({
-        error: 'clientId não informado.'
       })
     }
 
@@ -2171,20 +2168,35 @@ app.post('/publish-discord', desktopHandlers.discord = async (req, res) => {
     // Busca o canal Discord conectado
     // -------------------------------------------------------
 
-    const connectionResult =
-      req.publicationConnection ? { rows: [req.publicationConnection] } : await db.query(
+    let connectionResult
+
+    if (req.publicationConnection) {
+      connectionResult = {
+        rows: [req.publicationConnection]
+      }
+    } else {
+      const account = await getAccountFromRequest(req)
+
+      if (!account) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      connectionResult = await db.query(
         `
           SELECT
             guild_id,
             channel_id,
             channel_name
           FROM discord_connections
-          WHERE client_id = $1
+          WHERE user_id = $1
           ORDER BY created_at DESC
           LIMIT 1
         `,
-        [String(clientId)]
+        [account.id]
       )
+    }
 
     if (!connectionResult.rows.length) {
       return res.status(404).json({
