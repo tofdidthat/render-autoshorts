@@ -249,11 +249,36 @@ function validateTikTokUploadUrl(uploadUrl) {
 }
 
 app.get('/', (req, res) => {
-  res.json({
+  const ready =
+    desktopDatabaseReady === true
+
+  return res
+    .status(ready ? 200 : 503)
+    .json({
+      ok: ready,
+      ready,
+      service: 'AutoShorts Render',
+      temporaryRenders: renders.size
+    })
+})
+
+app.get('/health/live', (req, res) => {
+  return res.json({
     ok: true,
-    service: 'AutoShorts Render',
-    temporaryRenders: renders.size
+    service: 'AutoShorts Render'
   })
+})
+
+app.get('/health/ready', (req, res) => {
+  const ready =
+    desktopDatabaseReady === true
+
+  return res
+    .status(ready ? 200 : 503)
+    .json({
+      ok: ready,
+      ready
+    })
 })
 
 const desktopHandlers = {}
@@ -6718,6 +6743,8 @@ app.delete(
 )
 
 async function setupDatabase() {
+  desktopDatabaseReady = false
+
   try {
 await db.query(`
   CREATE TABLE IF NOT EXISTS account_users (
@@ -7088,27 +7115,70 @@ await db.query(`
   desktopDatabaseReady = true
   console.log('Telegram + Discord + Desktop database ready.')
   } catch (error) {
+    desktopDatabaseReady = false
+
     console.error(
-      'Error preparing Telegram database:',
+      'Database setup failed:',
       error
     )
+
+    throw error
   }
 }
 
 export { app, db, renders, setupDatabase, deleteRender }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-setupDatabase()
-registerDiscordCommands()
-app.listen(
-  port,
-  '0.0.0.0',
+async function initializeDatabaseWithRetry() {
+  let attempt = 0
 
-  () => {
-    console.log(
-      `Render server listening on port ${port}`
-    )
+  while (!desktopDatabaseReady) {
+    attempt += 1
+
+    try {
+      await setupDatabase()
+
+      console.log(
+        `Database ready after ${attempt} attempt(s).`
+      )
+
+      return
+    } catch (error) {
+      const delayMs =
+        Math.min(
+          30000,
+          2000 * (2 ** Math.min(attempt - 1, 4))
+        )
+
+      console.error(
+        `Database initialization attempt ${attempt} failed. Retrying in ${delayMs}ms.`
+      )
+
+      await new Promise(resolve =>
+        setTimeout(resolve, delayMs)
+      )
+    }
   }
-)
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  app.listen(
+    port,
+    '0.0.0.0',
+
+    () => {
+      console.log(
+        `Render server listening on port ${port}`
+      )
+    }
+  )
+
+  void initializeDatabaseWithRetry()
+    .then(() => registerDiscordCommands())
+    .catch(error => {
+      console.error(
+        'Unexpected database initialization loop failure:',
+        error
+      )
+    })
 }
 
