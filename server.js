@@ -260,6 +260,60 @@ const publicationService = createPublicationService({ db, renders, handlers: des
 const renderAudio = createRenderService({
   execFileAsync, renders, scheduleRenderCleanup, deleteFile
 })
+
+const MAX_GLOBAL_RENDER_JOBS =
+  Math.max(
+    1,
+    Number(process.env.MAX_GLOBAL_RENDER_JOBS || 2)
+  )
+
+const MAX_USER_RENDER_JOBS =
+  Math.max(
+    1,
+    Number(process.env.MAX_USER_RENDER_JOBS || 1)
+  )
+
+let activeRenderJobs = 0
+const activeRenderJobsByUser = new Map()
+
+async function withRenderCapacity(userId, task) {
+  if (activeRenderJobs >= MAX_GLOBAL_RENDER_JOBS) {
+    const error = new Error('Render capacity is currently full.')
+    error.code = 'RENDER_CAPACITY_FULL'
+    throw error
+  }
+
+  const currentUserJobs =
+    activeRenderJobsByUser.get(userId) || 0
+
+  if (currentUserJobs >= MAX_USER_RENDER_JOBS) {
+    const error = new Error('You already have a render in progress.')
+    error.code = 'USER_RENDER_LIMIT'
+    throw error
+  }
+
+  activeRenderJobs += 1
+  activeRenderJobsByUser.set(
+    userId,
+    currentUserJobs + 1
+  )
+
+  try {
+    return await task()
+  } finally {
+    activeRenderJobs =
+      Math.max(0, activeRenderJobs - 1)
+
+    const remaining =
+      (activeRenderJobsByUser.get(userId) || 1) - 1
+
+    if (remaining <= 0) {
+      activeRenderJobsByUser.delete(userId)
+    } else {
+      activeRenderJobsByUser.set(userId, remaining)
+    }
+  }
+}
 let desktopDatabaseReady = false
 
 // Account-owned social links can be disconnected without affecting other accounts.
@@ -310,6 +364,18 @@ app.post(
   ]),
 
   async (req, res) => {
+    const account =
+      await getAccountFromRequest(req)
+
+    if (!account) {
+      deleteFile(req.files?.cover?.[0]?.path)
+      deleteFile(req.files?.audio?.[0]?.path)
+
+      return res.status(401).json({
+        error: 'Invalid 1CE session.'
+      })
+    }
+
     const cover =
       req.files?.cover?.[0]
 
@@ -335,7 +401,15 @@ app.post(
         })
       }
 
-      const render = await renderAudio({ cover, audio })
+      const render = await withRenderCapacity(
+        account.id,
+        () =>
+          renderAudio({
+            cover,
+            audio,
+            ownerUserId: account.id
+          })
+      )
       renderId = render.id
       outputPath = render.path
       renderSaved = true
@@ -392,6 +466,15 @@ app.post(
       }
 
       if (!res.headersSent) {
+        if (
+          error?.code === 'RENDER_CAPACITY_FULL' ||
+          error?.code === 'USER_RENDER_LIMIT'
+        ) {
+          return res.status(429).json({
+            error: error.message
+          })
+        }
+
         res.status(500).json({
           error:
             'Falha ao renderizar vídeo.',
@@ -424,6 +507,18 @@ app.post(
   ]),
 
   async (req, res) => {
+    const account =
+      await getAccountFromRequest(req)
+
+    if (!account) {
+      deleteFile(req.files?.video?.[0]?.path)
+      deleteFile(req.files?.audio?.[0]?.path)
+
+      return res.status(401).json({
+        error: 'Invalid 1CE session.'
+      })
+    }
+
     const video =
       req.files?.video?.[0]
 
@@ -459,65 +554,81 @@ app.post(
 
       if (audio) {
         // Substitui completamente o áudio original
-        await execFileAsync(
-          'ffmpeg',
-          [
-            '-y',
+        await withRenderCapacity(
+          account.id,
+          () =>
+            execFileAsync(
+              'ffmpeg',
+              [
+                '-y',
 
-            '-i',
-            video.path,
+                '-i',
+                video.path,
 
-            '-i',
-            audio.path,
+                '-i',
+                audio.path,
 
-            '-map',
-            '0:v:0',
+                '-map',
+                '0:v:0',
 
-            '-map',
-            '1:a:0',
+                '-map',
+                '1:a:0',
 
-            '-c:v',
-            'copy',
+                '-c:v',
+                'copy',
 
-            '-c:a',
-            'aac',
+                '-c:a',
+                'aac',
 
-            '-b:a',
-            '192k',
+                '-b:a',
+                '192k',
 
-            '-shortest',
+                '-shortest',
 
-            '-movflags',
-            '+faststart',
+                '-movflags',
+                '+faststart',
 
-            outputPath
-          ]
+                outputPath
+              ],
+              {
+                timeout: 10 * 60 * 1000,
+                maxBuffer: 4 * 1024 * 1024
+              }
+            )
         )
       } else {
         // Mantém o vídeo e áudio originais.
         // Remux para MP4 sem recodificar o vídeo.
-        await execFileAsync(
-          'ffmpeg',
-          [
-            '-y',
+        await withRenderCapacity(
+          account.id,
+          () =>
+            execFileAsync(
+              'ffmpeg',
+              [
+                '-y',
 
-            '-i',
-            video.path,
+                '-i',
+                video.path,
 
-            '-map',
-            '0:v:0',
+                '-map',
+                '0:v:0',
 
-            '-map',
-            '0:a?',
+                '-map',
+                '0:a?',
 
-            '-c',
-            'copy',
+                '-c',
+                'copy',
 
-            '-movflags',
-            '+faststart',
+                '-movflags',
+                '+faststart',
 
-            outputPath
-          ]
+                outputPath
+              ],
+              {
+                timeout: 10 * 60 * 1000,
+                maxBuffer: 4 * 1024 * 1024
+              }
+            )
         )
       }
 
@@ -617,6 +728,15 @@ app.post(
       }
 
       if (!res.headersSent) {
+        if (
+          error?.code === 'RENDER_CAPACITY_FULL' ||
+          error?.code === 'USER_RENDER_LIMIT'
+        ) {
+          return res.status(429).json({
+            error: error.message
+          })
+        }
+
         res.status(500).json({
           error:
             'Falha ao preparar vídeo.',
