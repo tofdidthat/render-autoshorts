@@ -19,6 +19,7 @@ import { createRenderRuntime } from './render-runtime.js'
 import { createAccountService } from './services/account-service.js'
 import { createInternalRequestValidator } from './security/internal-request.js'
 import { createLegacyRenderVisibilityMiddleware } from './middleware/render-visibility.js'
+import { createHttpSecurityMiddleware } from './middleware/http-security.js'
 
 import { createHealthRouter } from './routes/health-routes.js'
 import { createRenderRouter } from './routes/render-routes.js'
@@ -61,6 +62,8 @@ const port = process.env.PORT || 8080
 const renders = new Map()
 const desktopHandlers = {}
 
+app.use(createHttpSecurityMiddleware())
+
 app.use(express.json({
   limit: '1mb',
 
@@ -75,35 +78,6 @@ app.use(express.json({
     }
   }
 }))
-
-// CORS
-app.use((req, res, next) => {
-  res.setHeader(
-    'Access-Control-Allow-Origin',
-    '*'
-  )
-
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET, POST, PATCH, DELETE, OPTIONS'
-  )
-
-  res.setHeader(
-  'Access-Control-Allow-Headers',
-  'Content-Type, Authorization, X-1CE-Internal-Secret'
-)
-
-  res.setHeader(
-    'Access-Control-Expose-Headers',
-    'X-Render-Id'
-  )
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204)
-  }
-
-  next()
-})
 
 const {
   execFileAsync,
@@ -271,7 +245,7 @@ app.use(
       databaseSetup.isReady(),
     frontendUrl: () =>
       process.env.ONECE_FRONTEND_URL ||
-      'https://1ce.app'
+      'https://1ce.lol'
   })
 )
 
