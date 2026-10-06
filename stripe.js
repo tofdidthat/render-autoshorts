@@ -15,6 +15,28 @@ function getStripeSecretKey() {
   return key
 }
 
+async function stripeGet(path) {
+  const response = await fetch(
+    `${STRIPE_API_URL}${path}`,
+    {
+      headers: {
+        Authorization: `Bearer ${getStripeSecretKey()}`
+      }
+    }
+  )
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+      `Stripe respondeu HTTP ${response.status}`
+    )
+  }
+
+  return data
+}
+
 async function stripePost(path, params, { idempotencyKey = null } = {}) {
   const response = await fetch(
     `${STRIPE_API_URL}${path}`,
@@ -89,6 +111,16 @@ export async function createStripeCheckoutSession({
     '/checkout/sessions',
     params,
     { idempotencyKey }
+  )
+}
+
+export async function retrieveStripeSubscription(subscriptionId) {
+  if (!subscriptionId) {
+    throw new Error('Stripe subscription não encontrada.')
+  }
+
+  return stripeGet(
+    `/subscriptions/${encodeURIComponent(String(subscriptionId))}`
   )
 }
 
