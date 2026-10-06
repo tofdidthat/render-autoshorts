@@ -1397,6 +1397,61 @@ async function sendTelegramMessage(
   }
 }
 
+
+async function telegramUserCanConnect(message) {
+  const botToken =
+    process.env.TELEGRAM_BOT_TOKEN
+
+  const chatId =
+    message?.chat?.id
+
+  const userId =
+    message?.from?.id
+
+  if (!botToken || !chatId || !userId) {
+    return false
+  }
+
+  // Private chats are controlled by the account owner directly.
+  if (message?.chat?.type === 'private') {
+    return String(chatId) === String(userId)
+  }
+
+  const response =
+    await fetch(
+      `https://api.telegram.org/bot${botToken}/getChatMember?chat_id=${encodeURIComponent(
+        String(chatId)
+      )}&user_id=${encodeURIComponent(
+        String(userId)
+      )}`
+    )
+
+  const data =
+    await response
+      .json()
+      .catch(() => ({}))
+
+  if (!response.ok || !data?.ok) {
+    console.warn(
+      'Telegram admin verification failed',
+      {
+        chatId,
+        userId,
+        description: data?.description
+      }
+    )
+
+    return false
+  }
+
+  return [
+    'creator',
+    'administrator'
+  ].includes(
+    String(data?.result?.status || '')
+  )
+}
+
 // ============================================================
 // TELEGRAM CONNECTION STATUS
 // Verifica se este navegador já conectou um Telegram
@@ -1542,6 +1597,19 @@ app.post('/telegram/webhook', async (req, res) => {
     }
 
     if (!chatId) {
+      return res.json({ ok: true })
+    }
+
+    const authorized =
+      await telegramUserCanConnect(message)
+
+    if (!authorized) {
+      await sendTelegramMessage(
+        chatId,
+        threadId,
+        '❌ Only a chat administrator can connect this destination to 1CE.'
+      ).catch(() => {})
+
       return res.json({ ok: true })
     }
 
@@ -2131,6 +2199,46 @@ app.post('/discord/interactions', async (req, res) => {
           'Discord Channel'
         )
 
+      let memberPermissions = 0n
+
+      try {
+        memberPermissions =
+          BigInt(
+            String(
+              interaction.member?.permissions ||
+              '0'
+            )
+          )
+      } catch {
+        memberPermissions = 0n
+      }
+
+      const canManageServer =
+        (memberPermissions & 0x8n) === 0x8n ||
+        (memberPermissions & 0x20n) === 0x20n
+
+      if (!canManageServer) {
+        return res.json({
+          type: 4,
+          data: {
+            content:
+              '❌ Only a server administrator or member with Manage Server permission can connect this destination to 1CE.',
+            flags: 64
+          }
+        })
+      }
+
+      if (!guildId || !channelId) {
+        return res.json({
+          type: 4,
+          data: {
+            content:
+              '❌ This command must be used inside a server channel.',
+            flags: 64
+          }
+        })
+      }
+
       if (!code) {
         return res.json({
           type: 4,
@@ -2586,6 +2694,12 @@ async function registerDiscordCommands() {
 
           description:
             'Connect this Discord channel to 1CE',
+
+          // MANAGE_GUILD (Manage Server). The handler also validates this
+          // permission so an old command registration cannot bypass it.
+          default_member_permissions: '32',
+
+          dm_permission: false,
 
           options: [
             {
