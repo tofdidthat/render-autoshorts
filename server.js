@@ -1162,9 +1162,20 @@ app.post('/telegram/connect-code', async (req, res) => {
       })
     }
 
-    const account = req.headers.authorization ? await getAccountFromRequest(req) : null
-    if (req.headers.authorization && !account) return res.status(401).json({ error: 'Invalid 1CE session.' })
-    if (account && !process.env.TELEGRAM_WEBHOOK_SECRET) return res.status(503).json({error:'Telegram account linking requires TELEGRAM_WEBHOOK_SECRET in Railway and secret_token in setWebhook.'})
+    const account = await getAccountFromRequest(req)
+
+    if (!account) {
+      return res.status(401).json({
+        error: 'Invalid 1CE session.'
+      })
+    }
+
+    if (!process.env.TELEGRAM_WEBHOOK_SECRET) {
+      return res.status(503).json({
+        error:
+          'Telegram account linking requires TELEGRAM_WEBHOOK_SECRET in Railway and secret_token in setWebhook.'
+      })
+    }
     const code =
       crypto
         .randomBytes(4)
@@ -1189,7 +1200,7 @@ app.post('/telegram/connect-code', async (req, res) => {
       [
         code,
         String(clientId),
-        account?.id || null
+        account.id
       ]
     )
 
@@ -1342,6 +1353,25 @@ app.get('/telegram/connect-status', async (req, res) => {
 
 app.post('/telegram/webhook', async (req, res) => {
   try {
+    const received =
+      req.headers['x-telegram-bot-api-secret-token']
+
+    const expected =
+      process.env.TELEGRAM_WEBHOOK_SECRET
+
+    if (
+      !received ||
+      !expected ||
+      typeof received !== 'string' ||
+      Buffer.byteLength(received) !== Buffer.byteLength(expected) ||
+      !crypto.timingSafeEqual(
+        Buffer.from(received),
+        Buffer.from(expected)
+      )
+    ) {
+      return res.sendStatus(401)
+    }
+
     const update = req.body || {}
 
     const message =
@@ -1417,12 +1447,6 @@ app.post('/telegram/webhook', async (req, res) => {
       return res.json({ ok: true })
     }
 
-    if (codeResult.rows[0].user_id) {
-      const received=req.headers['x-telegram-bot-api-secret-token']
-      const expected=process.env.TELEGRAM_WEBHOOK_SECRET
-      if (!received || !expected || typeof received!=='string' || Buffer.byteLength(received)!==Buffer.byteLength(expected) ||
-          !crypto.timingSafeEqual(Buffer.from(received),Buffer.from(expected))) return res.sendStatus(401)
-    }
     const claimed=await db.query(`UPDATE telegram_connect_codes SET used_at=NOW()
       WHERE code=$1 AND used_at IS NULL AND expires_at>NOW() RETURNING code`,[code])
     if (!claimed.rowCount) return res.json({ok:true})
