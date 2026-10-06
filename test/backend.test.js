@@ -636,6 +636,126 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       }
     })
 
+    await t.test('verification and password recovery codes are single-use under concurrent requests', async () => {
+      const verificationCode='123456'
+      const verificationHash=sha(verificationCode)
+
+      const createdUser=await query(`
+        INSERT INTO account_users (
+          email,
+          password_hash,
+          email_verified,
+          name
+        )
+        VALUES (
+          'atomic@example.com',
+          'scrypt$00$00',
+          FALSE,
+          'Atomic'
+        )
+        RETURNING id
+      `)
+
+      const atomicUserId=createdUser.rows[0].id
+
+      await query(`
+        INSERT INTO account_email_verifications (
+          user_id,
+          code_hash,
+          attempts,
+          expires_at
+        )
+        VALUES ($1,$2,0,NOW()+INTERVAL '10 minutes')
+      `,[atomicUserId,verificationHash])
+
+      const verifyRequest=()=>post('/account/email/verify',{
+        email:'atomic@example.com',
+        code:verificationCode
+      })
+
+      const verifyResults=await Promise.all([
+        verifyRequest(),
+        verifyRequest()
+      ])
+
+      assert.equal(
+        verifyResults.filter(result=>result.status===200).length,
+        1
+      )
+
+      assert.equal(
+        verifyResults.filter(result=>[400,409].includes(result.status)).length,
+        1
+      )
+
+      const resetCode='654321'
+      const resetHash=sha(resetCode)
+
+      await query(`
+        INSERT INTO account_password_resets (
+          user_id,
+          code_hash,
+          attempts,
+          expires_at
+        )
+        VALUES ($1,$2,0,NOW()+INTERVAL '10 minutes')
+      `,[atomicUserId,resetHash])
+
+      const resetVerify=()=>post('/account/password/verify',{
+        email:'atomic@example.com',
+        code:resetCode
+      })
+
+      const resetVerifyResults=await Promise.all([
+        resetVerify(),
+        resetVerify()
+      ])
+
+      const successfulVerify=
+        resetVerifyResults.find(
+          result=>result.status===200
+        )
+
+      assert.ok(successfulVerify?.data?.resetToken)
+
+      assert.equal(
+        resetVerifyResults.filter(result=>result.status===200).length,
+        1
+      )
+
+      const newPassword='new-password-123'
+
+      const resetPassword=()=>post('/account/password/reset',{
+        resetToken:successfulVerify.data.resetToken,
+        password:newPassword
+      })
+
+      const resetResults=await Promise.all([
+        resetPassword(),
+        resetPassword()
+      ])
+
+      assert.equal(
+        resetResults.filter(result=>result.status===200).length,
+        1
+      )
+
+      assert.equal(
+        resetResults.filter(result=>result.status===400).length,
+        1
+      )
+
+      const used=(await query(`
+        SELECT used_at
+        FROM account_password_resets
+        WHERE user_id=$1
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,[atomicUserId])).rows[0]
+
+      assert.ok(used.used_at)
+    })
+
     await t.test('bot connections bind account codes, reject forged webhook and disconnect only the owner', async () => {
       assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:credential.access_token})).status,401)
       assert.equal((await api('/api/desktop/connections/instagram',{method:'DELETE',token:session2})).status,200)
