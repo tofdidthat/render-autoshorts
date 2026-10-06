@@ -5969,6 +5969,8 @@ app.post(
             expires_at =
               EXCLUDED.expires_at,
 
+            refresh_started_at = NULL,
+
             updated_at =
               NOW()
         `,
@@ -6905,6 +6907,7 @@ app.patch(
               access_token = $5,
               token_type = $6,
               expires_at = $7,
+              refresh_started_at = NULL,
               updated_at = NOW()
 
             WHERE user_id = $8
@@ -6948,6 +6951,134 @@ app.patch(
   }
 )
 
+
+// ------------------------------------------------------------
+// INSTAGRAM TOKEN REFRESH LEASE
+// Prevents concurrent refreshes across Vercel instances.
+// ------------------------------------------------------------
+
+app.post(
+  '/account/instagram/refresh-lease',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE instagram_connections
+            SET refresh_started_at = NOW()
+            WHERE user_id = $1
+              AND (
+                refresh_started_at IS NULL
+                OR refresh_started_at <
+                  NOW() - INTERVAL '2 minutes'
+              )
+            RETURNING
+              access_token,
+              token_type,
+              expires_at
+          `,
+          [user.id]
+        )
+
+      if (!result.rowCount) {
+        return res.json({
+          claimed: false
+        })
+      }
+
+      const connection =
+        result.rows[0]
+
+      return res.json({
+        claimed: true,
+        connection: {
+          access_token:
+            connection.access_token,
+          token_type:
+            connection.token_type,
+          expires_at:
+            connection.expires_at
+              ? Number(connection.expires_at)
+              : null
+        }
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram refresh lease error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to claim Instagram refresh lease.'
+      })
+    }
+  }
+)
+
+app.post(
+  '/account/instagram/refresh-release',
+
+  async (req, res) => {
+    try {
+      if (!isValidInternalRequest(req)) {
+        return res.status(401).json({
+          error: 'Unauthorized internal request.'
+        })
+      }
+
+      const user =
+        await getAccountFromRequest(req)
+
+      if (!user) {
+        return res.status(401).json({
+          error: 'Invalid 1CE session.'
+        })
+      }
+
+      await db.query(
+        `
+          UPDATE instagram_connections
+          SET refresh_started_at = NULL
+          WHERE user_id = $1
+        `,
+        [user.id]
+      )
+
+      return res.json({
+        released: true
+      })
+
+    } catch (error) {
+      console.error(
+        'Instagram refresh release error:',
+        error
+      )
+
+      return res.status(500).json({
+        error:
+          'Failed to release Instagram refresh lease.'
+      })
+    }
+  }
+)
 
 // ------------------------------------------------------------
 // META DEAUTHORIZATION / DATA DELETION
@@ -7485,6 +7616,11 @@ await db.query(`
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
   )
+`)
+
+await db.query(`
+  ALTER TABLE instagram_connections
+  ADD COLUMN IF NOT EXISTS refresh_started_at TIMESTAMPTZ
 `)
 
 await db.query(`
