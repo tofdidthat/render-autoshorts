@@ -163,7 +163,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         assert.ok(!replay.headers.get('location').includes('#session='))
         assert.equal(providerCalls, 2)
         const legacy = await fetch(origin + '/account/google/callback?code=test-code', { redirect: 'manual' })
-        assert.match(legacy.headers.get('location'), /^https:\/\/1ce.app\/app#session=/)
+        assert.equal(legacy.headers.get('location'), 'https://1ce.app/app?login=error')
       } finally { globalThis.fetch = originalFetch }
     })
     const audio = path.join(bin, 'beat.mp3')
@@ -274,8 +274,8 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
       assert.ok([...pixel].every(value => value <= 2))
     })
     await t.test('legacy /render and /prepare-video still return MP4 and render header', async () => {
-      assert.equal((await api('/render', { method: 'POST', form: form() })).status, 400)
-      const rendered = await api('/render', { method: 'POST', form: form(true) })
+      assert.equal((await api('/render', { method: 'POST', token: session1, form: form() })).status, 400)
+      const rendered = await api('/render', { method: 'POST', token: session1, form: form(true) })
       assert.equal(rendered.status, 200)
       assert.match(rendered.headers.get('content-type'), /video\/mp4/)
       const legacyId = rendered.headers.get('x-render-id')
@@ -285,7 +285,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         const data = new FormData()
         data.append('video', new Blob([rendered.bytes], { type: 'video/mp4' }), 'video.mp4')
         if (replaceAudio) data.append('audio', new Blob([fs.readFileSync(audio)]), 'beat.mp3')
-        const prepared = await api('/prepare-video', { method: 'POST', form: data })
+        const prepared = await api('/prepare-video', { method: 'POST', token: session1, form: data })
         assert.equal(prepared.status, 200, prepared.data.toString())
         assert.ok(prepared.headers.get('x-render-id'))
       }
@@ -327,6 +327,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
           assert.equal(opts.headers.Authorization,'Bearer '+session1)
           const body=JSON.parse(opts.body)
           if(body.action==='describe')return Response.json({connected:true,name:body.provider+' studio'})
+          if(body.action==='status' && body.provider==='tiktok')return Response.json({data:{status:'SEND_TO_USER_INBOX'}})
           if(body.action==='init' && body.provider==='youtube')assert.equal(body.privacyStatus,'public','Desktop YouTube uploads must always be public')
           if(body.action==='init')return Response.json(body.provider==='youtube'?{uploadUrl:'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=test'}:{uploadUrl:'https://open-upload.tiktokapis.com/video/?upload_id=test',publishId:'draft-test'})
           assert.equal(body.provider,'instagram');sends.instagram++;privateUrl=body.videoUrl
@@ -379,7 +380,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         }
         assert.equal(status.status,'complete',JSON.stringify(status))
         assert.deepEqual(sends,{youtube:1,tiktok:1,instagram:1,telegram:2,discord:1})
-        assert.ok(Object.values(status.results).every(r=>['published','uploaded'].includes(r.state)),JSON.stringify(status))
+        assert.ok(Object.values(status.results).every(r=>['published','uploaded','delivered'].includes(r.state)),JSON.stringify(status))
         assert.ok(status.results.tiktok.message.includes('aplicativo'))
         assert.equal((await api(new URL(privateUrl).pathname+new URL(privateUrl).search)).status,404)
         assert.equal((await api('/api/desktop/publications/'+created.data.requestId,{token:session1})).status,401)
