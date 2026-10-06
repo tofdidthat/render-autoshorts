@@ -163,7 +163,7 @@ test('backend: desktop authorization, private renders, revocation and legacy reg
         assert.ok(!replay.headers.get('location').includes('#session='))
         assert.equal(providerCalls, 2)
         const legacy = await fetch(origin + '/account/google/callback?code=test-code', { redirect: 'manual' })
-        assert.equal(legacy.headers.get('location'), 'https://1ce.app/app?login=error')
+        assert.equal(legacy.headers.get('location'), 'https://1ce.lol/app?login=error')
       } finally { globalThis.fetch = originalFetch }
     })
     const audio = path.join(bin, 'beat.mp3')
