@@ -25,6 +25,8 @@ const db = new Pool({
 const execFileAsync = promisify(execFile)
 
 const app = express()
+app.set('trust proxy', 1)
+
 const port = process.env.PORT || 8080
 
 const RENDER_TTL_MS = 10 * 60 * 1000
@@ -3646,13 +3648,164 @@ app.post('/account/password/reset', async (req, res) => {
 })
 
 
+const LOGIN_WINDOW_MINUTES = 15
+const LOGIN_MAX_IP_ATTEMPTS = 30
+const LOGIN_MAX_PAIR_ATTEMPTS = 8
+
+function hashLoginRateValue(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value || ''))
+    .digest('hex')
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function getLoginRateState(email, req) {
+  const emailHash =
+    hashLoginRateValue(email)
+
+  const ipHash =
+    hashLoginRateValue(req.ip || req.socket?.remoteAddress || 'unknown')
+
+  const result = await db.query(
+    `
+      SELECT
+        COUNT(*) FILTER (
+          WHERE ip_hash = $2
+        )::int AS ip_attempts,
+
+        COUNT(*) FILTER (
+          WHERE email_hash = $1
+            AND ip_hash = $2
+        )::int AS pair_attempts,
+
+        COUNT(*) FILTER (
+          WHERE email_hash = $1
+        )::int AS email_attempts,
+
+        MIN(created_at) FILTER (
+          WHERE ip_hash = $2
+        ) AS oldest_ip_attempt,
+
+        MIN(created_at) FILTER (
+          WHERE email_hash = $1
+            AND ip_hash = $2
+        ) AS oldest_pair_attempt
+      FROM account_login_attempts
+      WHERE created_at >
+        NOW() - ($3 * INTERVAL '1 minute')
+    `,
+    [
+      emailHash,
+      ipHash,
+      LOGIN_WINDOW_MINUTES
+    ]
+  )
+
+  return {
+    emailHash,
+    ipHash,
+    ...result.rows[0]
+  }
+}
+
+function loginRetryAfterSeconds(oldestAttempt) {
+  if (!oldestAttempt) return 60
+
+  const elapsedSeconds =
+    Math.floor(
+      (Date.now() - new Date(oldestAttempt).getTime()) /
+      1000
+    )
+
+  return Math.max(
+    1,
+    LOGIN_WINDOW_MINUTES * 60 - elapsedSeconds
+  )
+}
+
+async function recordFailedLoginAttempt(emailHash, ipHash) {
+  await db.query(
+    `
+      INSERT INTO account_login_attempts (
+        email_hash,
+        ip_hash
+      )
+      VALUES ($1, $2)
+    `,
+    [
+      emailHash,
+      ipHash
+    ]
+  )
+
+  // Opportunistic cleanup keeps the table bounded without a separate job.
+  if (Math.random() < 0.02) {
+    db.query(
+      `
+        DELETE FROM account_login_attempts
+        WHERE created_at < NOW() - INTERVAL '24 hours'
+      `
+    ).catch(() => {})
+  }
+}
+
+function progressiveLoginDelay(attempts) {
+  if (attempts < 2) return 0
+
+  return Math.min(
+    4000,
+    250 * (2 ** Math.min(attempts - 2, 4))
+  )
+}
+
 app.post('/account/email/login', async (req, res) => {
   try {
     const email = normalizeAccountEmail(req.body?.email)
     const password = String(req.body?.password || '')
 
     if (!isValidAccountEmail(email) || !password) {
-      return res.status(401).json({ error: 'Invalid email or password.' })
+      return res.status(401).json({
+        error: 'Invalid email or password.'
+      })
+    }
+
+    const rate =
+      await getLoginRateState(email, req)
+
+    if (
+      rate.ip_attempts >= LOGIN_MAX_IP_ATTEMPTS ||
+      rate.pair_attempts >= LOGIN_MAX_PAIR_ATTEMPTS
+    ) {
+      const retryAfter =
+        rate.ip_attempts >= LOGIN_MAX_IP_ATTEMPTS
+          ? loginRetryAfterSeconds(rate.oldest_ip_attempt)
+          : loginRetryAfterSeconds(rate.oldest_pair_attempt)
+
+      res.setHeader(
+        'Retry-After',
+        String(retryAfter)
+      )
+
+      console.warn('Password login rate limited', {
+        ipAttempts: rate.ip_attempts,
+        pairAttempts: rate.pair_attempts
+      })
+
+      return res.status(429).json({
+        error:
+          'Too many sign-in attempts. Please wait and try again.'
+      })
+    }
+
+    const delay =
+      progressiveLoginDelay(rate.email_attempts)
+
+    if (delay) {
+      await sleep(delay)
     }
 
     const result = await db.query(
@@ -3668,16 +3821,31 @@ app.post('/account/email/login', async (req, res) => {
     const user = result.rows[0]
 
     if (!user || !user.password_hash) {
-      return res.status(401).json({ error: 'Invalid email or password.' })
+      await recordFailedLoginAttempt(
+        rate.emailHash,
+        rate.ipHash
+      )
+
+      return res.status(401).json({
+        error: 'Invalid email or password.'
+      })
     }
 
-    const validPassword = await verifyAccountPassword(
-      password,
-      user.password_hash
-    )
+    const validPassword =
+      await verifyAccountPassword(
+        password,
+        user.password_hash
+      )
 
     if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid email or password.' })
+      await recordFailedLoginAttempt(
+        rate.emailHash,
+        rate.ipHash
+      )
+
+      return res.status(401).json({
+        error: 'Invalid email or password.'
+      })
     }
 
     if (!user.email_verified) {
@@ -3687,7 +3855,18 @@ app.post('/account/email/login', async (req, res) => {
       })
     }
 
-    const sessionToken = await createAccountSession(user.id)
+    // A successful login clears account-specific failures, while
+    // unrelated IP abuse remains visible for rate limiting.
+    await db.query(
+      `
+        DELETE FROM account_login_attempts
+        WHERE email_hash = $1
+      `,
+      [rate.emailHash]
+    )
+
+    const sessionToken =
+      await createAccountSession(user.id)
 
     return res.json({
       ok: true,
@@ -3695,7 +3874,10 @@ app.post('/account/email/login', async (req, res) => {
     })
   } catch (error) {
     console.error('Email login error:', error)
-    return res.status(500).json({ error: 'Unable to sign in.' })
+
+    return res.status(500).json({
+      error: 'Unable to sign in.'
+    })
   }
 })
 
@@ -6105,6 +6287,30 @@ await db.query(`
     expires_at TIMESTAMPTZ
       NOT NULL
   )
+`)
+
+await db.query(`
+  CREATE TABLE IF NOT EXISTS account_login_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    email_hash TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_login_attempts_email_time_idx
+  ON account_login_attempts(email_hash, created_at DESC)
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_login_attempts_ip_time_idx
+  ON account_login_attempts(ip_hash, created_at DESC)
+`)
+
+await db.query(`
+  CREATE INDEX IF NOT EXISTS account_login_attempts_pair_time_idx
+  ON account_login_attempts(email_hash, ip_hash, created_at DESC)
 `)
 
 await db.query(`
