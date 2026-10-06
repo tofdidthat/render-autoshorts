@@ -14,7 +14,8 @@ import { setupPublicationDatabase, createPublicationService } from './publicatio
 import {
   createStripeCheckoutSession,
   createStripeBillingPortalSession,
-  retrieveStripeSubscription
+  retrieveStripeSubscription,
+  retrieveStripePrice
 } from './stripe.js'
 
 const { Pool } = pg
@@ -5497,17 +5498,68 @@ app.get(
         [user.id]
       )
 
-      const subscription = subscriptionResult.rows[0] || null
-      const plan = stripePlanFromStatus(subscription?.status)
+      const subscription =
+        subscriptionResult.rows[0] || null
+
+      const plan =
+        stripePlanFromStatus(
+          subscription?.status
+        )
+
+      let price = null
+
+      if (subscription?.price_id) {
+        try {
+          const stripePrice =
+            await retrieveStripePrice(
+              subscription.price_id
+            )
+
+          price = {
+            id: stripePrice.id,
+            unitAmount:
+              Number.isFinite(
+                Number(stripePrice.unit_amount)
+              )
+                ? Number(stripePrice.unit_amount)
+                : null,
+            currency:
+              stripePrice.currency || null,
+            interval:
+              stripePrice.recurring?.interval || null,
+            intervalCount:
+              stripePrice.recurring?.interval_count || null
+          }
+        } catch (error) {
+          console.warn(
+            'Unable to retrieve Stripe price for account:',
+            error?.message || error
+          )
+        }
+      }
 
       res.json({
         authenticated: true,
         plan,
         subscription: subscription
           ? {
-              status: subscription.status,
-              currentPeriodEnd: subscription.current_period_end,
-              cancelAtPeriodEnd: subscription.cancel_at_period_end
+              status:
+                subscription.status,
+              priceId:
+                subscription.price_id,
+              currentPeriodEnd:
+                subscription.current_period_end,
+              cancelAtPeriodEnd:
+                subscription.cancel_at_period_end,
+              hasStripeCustomer:
+                Boolean(
+                  subscription.stripe_customer_id
+                ),
+              hasStripeSubscription:
+                Boolean(
+                  subscription.stripe_subscription_id
+                ),
+              price
             }
           : null,
 
