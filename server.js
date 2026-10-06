@@ -3435,7 +3435,8 @@ app.get(
       if (
         !userResponse.ok ||
         !googleUser.sub ||
-        !googleUser.email
+        !googleUser.email ||
+        googleUser.email_verified !== true
       ) {
         console.error(
           'Google userinfo error:',
@@ -3448,8 +3449,8 @@ app.get(
       }
 
       // Cria, atualiza ou vincula usuário 1CE.
-      // Se já existir uma conta com o mesmo e-mail, mantém o mesmo
-      // usuário (inclusive password_hash) e apenas vincula o Google.
+      // Um cadastro por e-mail ainda não verificado não pode preservar
+      // credenciais criadas antes de o verdadeiro dono entrar pelo Google.
       const googleEmail =
         normalizeAccountEmail(googleUser.email)
 
@@ -3495,7 +3496,7 @@ app.get(
           const existingByEmail =
             await client.query(
               `
-                SELECT id, google_id
+                SELECT id, google_id, email_verified
                 FROM account_users
                 WHERE LOWER(email) = $1
                 LIMIT 1
@@ -3517,6 +3518,44 @@ app.get(
             }
 
             userId = existingUser.id
+
+            if (!existingUser.email_verified) {
+              // A senha e os códigos pertencem a um cadastro cuja posse do
+              // e-mail nunca foi provada. O Google verificado passa a ser a
+              // primeira prova válida de propriedade dessa conta.
+              await client.query(
+                `
+                  UPDATE account_users
+                  SET password_hash = NULL
+                  WHERE id = $1
+                `,
+                [userId]
+              )
+
+              await client.query(
+                `
+                  DELETE FROM account_email_verifications
+                  WHERE user_id = $1
+                `,
+                [userId]
+              )
+
+              await client.query(
+                `
+                  DELETE FROM account_password_resets
+                  WHERE user_id = $1
+                `,
+                [userId]
+              )
+
+              await client.query(
+                `
+                  DELETE FROM account_sessions
+                  WHERE user_id = $1
+                `,
+                [userId]
+              )
+            }
 
             await client.query(
               `
