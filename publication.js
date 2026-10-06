@@ -88,9 +88,19 @@ export function createPublicationService({ db, renders, handlers, backendUrl, fr
     return results
   }
 
-  async function connections(userId, accountToken) {
+  async function connections(
+    userId,
+    accountToken,
+    providers = publicationProviders
+  ) {
+    const requestedProviders =
+      providers.filter(
+        provider =>
+          publicationProviders.includes(provider)
+      )
+
     return mapWithConcurrency(
-      publicationProviders,
+      requestedProviders,
       3,
       async provider => {
         const connection =
