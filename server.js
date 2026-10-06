@@ -3292,104 +3292,237 @@ async function sendPasswordResetEmail(email, code) {
 }
 
 async function issuePasswordResetCode(userId, email) {
-  const recent = await db.query(
-    `SELECT created_at FROM account_password_resets WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-    [userId]
-  )
+  const code =
+    String(
+      crypto.randomInt(0, 1000000)
+    ).padStart(6, '0')
 
-  if (recent.rows.length) {
-    const elapsed = Date.now() - new Date(recent.rows[0].created_at).getTime()
-    if (elapsed < EMAIL_RESEND_COOLDOWN_SECONDS * 1000) {
-      const error = new Error('Please wait before requesting another code.')
-      error.statusCode = 429
-      throw error
-    }
-  }
+  const codeHash =
+    hashEmailVerificationCode(code)
 
-  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0')
-  const codeHash = hashEmailVerificationCode(code)
-
-  await db.query(
-    `UPDATE account_password_resets SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
-    [userId]
-  )
-
-  const inserted = await db.query(
-    `INSERT INTO account_password_resets (user_id, code_hash, expires_at)
-     VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 minute')) RETURNING id`,
-    [userId, codeHash, EMAIL_CODE_TTL_MINUTES]
-  )
+  const client = await db.connect()
+  let insertedId
 
   try {
-    await sendPasswordResetEmail(email, code)
+    await client.query('BEGIN')
+
+    await client.query(
+      `
+        SELECT id
+        FROM account_users
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [userId]
+    )
+
+    const recent =
+      await client.query(
+        `
+          SELECT created_at
+          FROM account_password_resets
+          WHERE user_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [userId]
+      )
+
+    if (recent.rows.length) {
+      const elapsed =
+        Date.now() -
+        new Date(
+          recent.rows[0].created_at
+        ).getTime()
+
+      if (
+        elapsed <
+        EMAIL_RESEND_COOLDOWN_SECONDS * 1000
+      ) {
+        const error =
+          new Error(
+            'Please wait before requesting another code.'
+          )
+
+        error.statusCode = 429
+        throw error
+      }
+    }
+
+    await client.query(
+      `
+        UPDATE account_password_resets
+        SET used_at = NOW()
+        WHERE user_id = $1
+          AND used_at IS NULL
+      `,
+      [userId]
+    )
+
+    const inserted =
+      await client.query(
+        `
+          INSERT INTO account_password_resets (
+            user_id,
+            code_hash,
+            expires_at
+          )
+          VALUES (
+            $1,
+            $2,
+            NOW() + ($3 * INTERVAL '1 minute')
+          )
+          RETURNING id
+        `,
+        [
+          userId,
+          codeHash,
+          EMAIL_CODE_TTL_MINUTES
+        ]
+      )
+
+    insertedId =
+      inserted.rows[0].id
+
+    await client.query('COMMIT')
   } catch (error) {
-    await db.query(`DELETE FROM account_password_resets WHERE id = $1`, [inserted.rows[0].id]).catch(() => {})
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  try {
+    await sendPasswordResetEmail(
+      email,
+      code
+    )
+  } catch (error) {
+    await db.query(
+      `
+        DELETE FROM account_password_resets
+        WHERE id = $1
+      `,
+      [insertedId]
+    ).catch(() => {})
+
     throw error
   }
 }
 
 async function issueEmailVerificationCode(userId, email) {
-  const recent = await db.query(
-    `
-      SELECT created_at
-      FROM account_email_verifications
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1
-    `,
-    [userId]
-  )
+  const code =
+    String(
+      crypto.randomInt(0, 1000000)
+    ).padStart(6, '0')
 
-  if (recent.rows.length) {
-    const elapsed =
-      Date.now() - new Date(recent.rows[0].created_at).getTime()
+  const codeHash =
+    hashEmailVerificationCode(code)
 
-    if (elapsed < EMAIL_RESEND_COOLDOWN_SECONDS * 1000) {
-      const error = new Error('Please wait before requesting another code.')
-      error.statusCode = 429
-      throw error
-    }
-  }
-
-  const code = String(
-    crypto.randomInt(0, 1000000)
-  ).padStart(6, '0')
-
-  const codeHash = hashEmailVerificationCode(code)
-
-  await db.query(
-    `
-      UPDATE account_email_verifications
-      SET used_at = NOW()
-      WHERE user_id = $1
-        AND used_at IS NULL
-    `,
-    [userId]
-  )
-
-  const inserted = await db.query(
-    `
-      INSERT INTO account_email_verifications (
-        user_id,
-        code_hash,
-        expires_at
-      )
-      VALUES (
-        $1,
-        $2,
-        NOW() + ($3 * INTERVAL '1 minute')
-      )
-      RETURNING id
-    `,
-    [userId, codeHash, EMAIL_CODE_TTL_MINUTES]
-  )
+  const client = await db.connect()
+  let insertedId
 
   try {
-    await sendAccountVerificationEmail(email, code)
+    await client.query('BEGIN')
+
+    await client.query(
+      `
+        SELECT id
+        FROM account_users
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [userId]
+    )
+
+    const recent =
+      await client.query(
+        `
+          SELECT created_at
+          FROM account_email_verifications
+          WHERE user_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [userId]
+      )
+
+    if (recent.rows.length) {
+      const elapsed =
+        Date.now() -
+        new Date(
+          recent.rows[0].created_at
+        ).getTime()
+
+      if (
+        elapsed <
+        EMAIL_RESEND_COOLDOWN_SECONDS * 1000
+      ) {
+        const error =
+          new Error(
+            'Please wait before requesting another code.'
+          )
+
+        error.statusCode = 429
+        throw error
+      }
+    }
+
+    await client.query(
+      `
+        UPDATE account_email_verifications
+        SET used_at = NOW()
+        WHERE user_id = $1
+          AND used_at IS NULL
+      `,
+      [userId]
+    )
+
+    const inserted =
+      await client.query(
+        `
+          INSERT INTO account_email_verifications (
+            user_id,
+            code_hash,
+            expires_at
+          )
+          VALUES (
+            $1,
+            $2,
+            NOW() + ($3 * INTERVAL '1 minute')
+          )
+          RETURNING id
+        `,
+        [
+          userId,
+          codeHash,
+          EMAIL_CODE_TTL_MINUTES
+        ]
+      )
+
+    insertedId =
+      inserted.rows[0].id
+
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  try {
+    await sendAccountVerificationEmail(
+      email,
+      code
+    )
   } catch (error) {
     await db.query(
-      `DELETE FROM account_email_verifications WHERE id = $1`,
-      [inserted.rows[0].id]
+      `
+        DELETE FROM account_email_verifications
+        WHERE id = $1
+      `,
+      [insertedId]
     ).catch(() => {})
 
     throw error
@@ -3491,114 +3624,193 @@ app.post('/account/email/register', async (req, res) => {
 })
 
 app.post('/account/email/verify', async (req, res) => {
+  const client = await db.connect()
+
   try {
-    const email = normalizeAccountEmail(req.body?.email)
-    const code = String(req.body?.code || '').trim()
+    const email =
+      normalizeAccountEmail(req.body?.email)
 
-    if (!isValidAccountEmail(email) || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ error: 'Invalid email or code.' })
-    }
+    const code =
+      String(req.body?.code || '').trim()
 
-    const userResult = await db.query(
-      `
-        SELECT id, email_verified
-        FROM account_users
-        WHERE LOWER(email) = $1
-        LIMIT 1
-      `,
-      [email]
-    )
-
-    if (!userResult.rows.length) {
-      return res.status(400).json({ error: 'Invalid or expired code.' })
-    }
-
-    const user = userResult.rows[0]
-
-    if (user.email_verified) {
-      return res.status(409).json({ error: 'Email is already verified.' })
-    }
-
-    const verificationResult = await db.query(
-      `
-        SELECT id, code_hash, attempts
-        FROM account_email_verifications
-        WHERE user_id = $1
-          AND used_at IS NULL
-          AND expires_at > NOW()
-        ORDER BY created_at DESC
-        LIMIT 1
-      `,
-      [user.id]
-    )
-
-    if (!verificationResult.rows.length) {
-      return res.status(400).json({ error: 'Invalid or expired code.' })
-    }
-
-    const verification = verificationResult.rows[0]
-
-    if (verification.attempts >= EMAIL_MAX_ATTEMPTS) {
-      return res.status(429).json({
-        error: 'Too many attempts. Request a new code.'
+    if (
+      !isValidAccountEmail(email) ||
+      !/^\d{6}$/.test(code)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid email or code.'
       })
     }
 
-    const receivedHash = hashEmailVerificationCode(code)
-    const expected = Buffer.from(verification.code_hash, 'hex')
-    const received = Buffer.from(receivedHash, 'hex')
+    await client.query('BEGIN')
 
-    const valid =
-      expected.length === received.length &&
-      crypto.timingSafeEqual(expected, received)
-
-    if (!valid) {
-      await db.query(
-        `
-          UPDATE account_email_verifications
-          SET attempts = attempts + 1
-          WHERE id = $1
-        `,
-        [verification.id]
-      )
-
-      return res.status(400).json({ error: 'Invalid or expired code.' })
-    }
-
-    const client = await db.connect()
-
-    try {
-      await client.query('BEGIN')
-
+    const userResult =
       await client.query(
         `
-          UPDATE account_users
-          SET email_verified = TRUE,
-              updated_at = NOW()
-          WHERE id = $1
+          SELECT id, email_verified
+          FROM account_users
+          WHERE LOWER(email) = $1
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [email]
+      )
+
+    const user =
+      userResult.rows[0]
+
+    if (!user) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
+    }
+
+    if (user.email_verified) {
+      await client.query('ROLLBACK')
+
+      return res.status(409).json({
+        error: 'Email is already verified.'
+      })
+    }
+
+    const verificationResult =
+      await client.query(
+        `
+          SELECT id, code_hash, attempts
+          FROM account_email_verifications
+          WHERE user_id = $1
+            AND used_at IS NULL
+            AND expires_at > NOW()
+          ORDER BY created_at DESC
+          LIMIT 1
+          FOR UPDATE
         `,
         [user.id]
       )
 
+    const verification =
+      verificationResult.rows[0]
+
+    if (!verification) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
+    }
+
+    if (
+      verification.attempts >=
+      EMAIL_MAX_ATTEMPTS
+    ) {
+      await client.query('ROLLBACK')
+
+      return res.status(429).json({
+        error:
+          'Too many attempts. Request a new code.'
+      })
+    }
+
+    const expected =
+      Buffer.from(
+        verification.code_hash,
+        'hex'
+      )
+
+    const received =
+      Buffer.from(
+        hashEmailVerificationCode(code),
+        'hex'
+      )
+
+    const valid =
+      expected.length === received.length &&
+      crypto.timingSafeEqual(
+        expected,
+        received
+      )
+
+    if (!valid) {
+      const updated =
+        await client.query(
+          `
+            UPDATE account_email_verifications
+            SET attempts = attempts + 1
+            WHERE id = $1
+              AND used_at IS NULL
+              AND attempts < $2
+            RETURNING attempts
+          `,
+          [
+            verification.id,
+            EMAIL_MAX_ATTEMPTS
+          ]
+        )
+
+      await client.query('COMMIT')
+
+      if (
+        updated.rows[0]?.attempts >=
+        EMAIL_MAX_ATTEMPTS
+      ) {
+        return res.status(429).json({
+          error:
+            'Too many attempts. Request a new code.'
+        })
+      }
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
+    }
+
+    const consumed =
       await client.query(
         `
           UPDATE account_email_verifications
           SET used_at = NOW()
-          WHERE user_id = $1
+          WHERE id = $1
             AND used_at IS NULL
+            AND expires_at > NOW()
+          RETURNING id
         `,
-        [user.id]
+        [verification.id]
       )
 
-      await client.query('COMMIT')
-    } catch (error) {
+    if (!consumed.rowCount) {
       await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
     }
 
-    const sessionToken = await createAccountSession(user.id)
+    await client.query(
+      `
+        UPDATE account_users
+        SET email_verified = TRUE,
+            updated_at = NOW()
+        WHERE id = $1
+      `,
+      [user.id]
+    )
+
+    await client.query(
+      `
+        UPDATE account_email_verifications
+        SET used_at = NOW()
+        WHERE user_id = $1
+          AND used_at IS NULL
+      `,
+      [user.id]
+    )
+
+    await client.query('COMMIT')
+
+    const sessionToken =
+      await createAccountSession(user.id)
 
     return res.json({
       ok: true,
@@ -3606,8 +3818,18 @@ app.post('/account/email/verify', async (req, res) => {
       session: sessionToken
     })
   } catch (error) {
-    console.error('Email verification error:', error)
-    return res.status(500).json({ error: 'Unable to verify email.' })
+    await client.query('ROLLBACK').catch(() => {})
+
+    console.error(
+      'Email verification error:',
+      error
+    )
+
+    return res.status(500).json({
+      error: 'Unable to verify email.'
+    })
+  } finally {
+    client.release()
   }
 })
 
@@ -3682,108 +3904,321 @@ app.post('/account/password/forgot', async (req, res) => {
 })
 
 app.post('/account/password/verify', async (req, res) => {
+  const client = await db.connect()
+
   try {
-    const email = normalizeAccountEmail(req.body?.email)
-    const code = String(req.body?.code || '').trim()
+    const email =
+      normalizeAccountEmail(req.body?.email)
 
-    if (!isValidAccountEmail(email) || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ error: 'Invalid email or code.' })
+    const code =
+      String(req.body?.code || '').trim()
+
+    if (
+      !isValidAccountEmail(email) ||
+      !/^\d{6}$/.test(code)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid email or code.'
+      })
     }
 
-    const userResult = await db.query(
-      `SELECT id FROM account_users WHERE LOWER(email) = $1 LIMIT 1`,
-      [email]
-    )
-    if (!userResult.rows.length) {
-      return res.status(400).json({ error: 'Invalid or expired code.' })
+    await client.query('BEGIN')
+
+    const userResult =
+      await client.query(
+        `
+          SELECT id
+          FROM account_users
+          WHERE LOWER(email) = $1
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [email]
+      )
+
+    const user =
+      userResult.rows[0]
+
+    if (!user) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
     }
 
-    const resetResult = await db.query(
-      `SELECT id, code_hash, attempts FROM account_password_resets
-       WHERE user_id = $1 AND used_at IS NULL AND verified_at IS NULL AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
-      [userResult.rows[0].id]
-    )
-    if (!resetResult.rows.length) {
-      return res.status(400).json({ error: 'Invalid or expired code.' })
+    const resetResult =
+      await client.query(
+        `
+          SELECT id, code_hash, attempts
+          FROM account_password_resets
+          WHERE user_id = $1
+            AND used_at IS NULL
+            AND verified_at IS NULL
+            AND expires_at > NOW()
+          ORDER BY created_at DESC
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [user.id]
+      )
+
+    const reset =
+      resetResult.rows[0]
+
+    if (!reset) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
     }
 
-    const reset = resetResult.rows[0]
-    if (reset.attempts >= EMAIL_MAX_ATTEMPTS) {
-      return res.status(429).json({ error: 'Too many attempts. Request a new code.' })
+    if (
+      reset.attempts >=
+      EMAIL_MAX_ATTEMPTS
+    ) {
+      await client.query('ROLLBACK')
+
+      return res.status(429).json({
+        error:
+          'Too many attempts. Request a new code.'
+      })
     }
 
-    const expected = Buffer.from(reset.code_hash, 'hex')
-    const received = Buffer.from(hashEmailVerificationCode(code), 'hex')
-    const valid = expected.length === received.length && crypto.timingSafeEqual(expected, received)
+    const expected =
+      Buffer.from(
+        reset.code_hash,
+        'hex'
+      )
+
+    const received =
+      Buffer.from(
+        hashEmailVerificationCode(code),
+        'hex'
+      )
+
+    const valid =
+      expected.length === received.length &&
+      crypto.timingSafeEqual(
+        expected,
+        received
+      )
 
     if (!valid) {
-      await db.query(`UPDATE account_password_resets SET attempts = attempts + 1 WHERE id = $1`, [reset.id])
-      return res.status(400).json({ error: 'Invalid or expired code.' })
+      const updated =
+        await client.query(
+          `
+            UPDATE account_password_resets
+            SET attempts = attempts + 1
+            WHERE id = $1
+              AND used_at IS NULL
+              AND verified_at IS NULL
+              AND attempts < $2
+            RETURNING attempts
+          `,
+          [
+            reset.id,
+            EMAIL_MAX_ATTEMPTS
+          ]
+        )
+
+      await client.query('COMMIT')
+
+      if (
+        updated.rows[0]?.attempts >=
+        EMAIL_MAX_ATTEMPTS
+      ) {
+        return res.status(429).json({
+          error:
+            'Too many attempts. Request a new code.'
+        })
+      }
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
     }
 
-    const resetToken = crypto.randomBytes(32).toString('hex')
-    const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex')
+    const resetToken =
+      crypto.randomBytes(32).toString('hex')
 
-    await db.query(
-      `UPDATE account_password_resets
-       SET verified_at = NOW(), reset_token_hash = $1, reset_token_expires_at = NOW() + INTERVAL '10 minutes'
-       WHERE id = $2`,
-      [resetTokenHash, reset.id]
+    const resetTokenHash =
+      crypto
+        .createHash('sha256')
+        .update(resetToken)
+        .digest('hex')
+
+    const consumed =
+      await client.query(
+        `
+          UPDATE account_password_resets
+          SET verified_at = NOW(),
+              reset_token_hash = $1,
+              reset_token_expires_at =
+                NOW() + INTERVAL '10 minutes'
+          WHERE id = $2
+            AND used_at IS NULL
+            AND verified_at IS NULL
+            AND expires_at > NOW()
+          RETURNING id
+        `,
+        [
+          resetTokenHash,
+          reset.id
+        ]
+      )
+
+    if (!consumed.rowCount) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error: 'Invalid or expired code.'
+      })
+    }
+
+    await client.query('COMMIT')
+
+    return res.json({
+      ok: true,
+      resetToken
+    })
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+
+    console.error(
+      'Password reset verify error:',
+      error
     )
 
-    return res.json({ ok: true, resetToken })
-  } catch (error) {
-    console.error('Password reset verify error:', error)
-    return res.status(500).json({ error: 'Unable to verify reset code.' })
+    return res.status(500).json({
+      error:
+        'Unable to verify reset code.'
+    })
+  } finally {
+    client.release()
   }
 })
 
 app.post('/account/password/reset', async (req, res) => {
+  const client = await db.connect()
+
   try {
-    const resetToken = String(req.body?.resetToken || '')
-    const password = String(req.body?.password || '')
+    const resetToken =
+      String(req.body?.resetToken || '')
 
-    if (!resetToken || password.length < 8 || password.length > 128) {
-      return res.status(400).json({ error: 'Invalid reset token or password.' })
+    const password =
+      String(req.body?.password || '')
+
+    if (
+      !resetToken ||
+      password.length < 8 ||
+      password.length > 128
+    ) {
+      return res.status(400).json({
+        error:
+          'Invalid reset token or password.'
+      })
     }
 
-    const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex')
-    const resetResult = await db.query(
-      `SELECT id, user_id FROM account_password_resets
-       WHERE reset_token_hash = $1 AND verified_at IS NOT NULL AND used_at IS NULL
-         AND reset_token_expires_at > NOW()
-       LIMIT 1`,
-      [resetTokenHash]
-    )
-    if (!resetResult.rows.length) {
-      return res.status(400).json({ error: 'Invalid or expired reset token.' })
-    }
+    const resetTokenHash =
+      crypto
+        .createHash('sha256')
+        .update(resetToken)
+        .digest('hex')
 
-    const reset = resetResult.rows[0]
-    const passwordHash = await hashAccountPassword(password)
-    const client = await db.connect()
-    try {
-      await client.query('BEGIN')
+    const passwordHash =
+      await hashAccountPassword(password)
+
+    await client.query('BEGIN')
+
+    const resetResult =
       await client.query(
-        `UPDATE account_users SET password_hash = $1, email_verified = TRUE, updated_at = NOW() WHERE id = $2`,
-        [passwordHash, reset.user_id]
+        `
+          SELECT id, user_id
+          FROM account_password_resets
+          WHERE reset_token_hash = $1
+            AND verified_at IS NOT NULL
+            AND used_at IS NULL
+            AND reset_token_expires_at > NOW()
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [resetTokenHash]
       )
-      await client.query(`UPDATE account_password_resets SET used_at = NOW() WHERE id = $1`, [reset.id])
-      // Sign out existing sessions after a password reset.
-      await client.query(`DELETE FROM account_sessions WHERE user_id = $1`, [reset.user_id])
-      await client.query('COMMIT')
-    } catch (error) {
+
+    const reset =
+      resetResult.rows[0]
+
+    if (!reset) {
       await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
+
+      return res.status(400).json({
+        error:
+          'Invalid or expired reset token.'
+      })
     }
+
+    const consumed =
+      await client.query(
+        `
+          UPDATE account_password_resets
+          SET used_at = NOW()
+          WHERE id = $1
+            AND used_at IS NULL
+            AND reset_token_expires_at > NOW()
+          RETURNING user_id
+        `,
+        [reset.id]
+      )
+
+    if (!consumed.rowCount) {
+      await client.query('ROLLBACK')
+
+      return res.status(400).json({
+        error:
+          'Invalid or expired reset token.'
+      })
+    }
+
+    await client.query(
+      `
+        UPDATE account_users
+        SET password_hash = $1,
+            email_verified = TRUE,
+            updated_at = NOW()
+        WHERE id = $2
+      `,
+      [
+        passwordHash,
+        reset.user_id
+      ]
+    )
+
+    await client.query(
+      `
+        DELETE FROM account_sessions
+        WHERE user_id = $1
+      `,
+      [reset.user_id]
+    )
+
+    await client.query('COMMIT')
 
     return res.json({ ok: true })
   } catch (error) {
-    console.error('Password reset error:', error)
-    return res.status(500).json({ error: 'Unable to reset password.' })
+    await client.query('ROLLBACK').catch(() => {})
+
+    console.error(
+      'Password reset error:',
+      error
+    )
+
+    return res.status(500).json({
+      error: 'Unable to reset password.'
+    })
+  } finally {
+    client.release()
   }
 })
 
