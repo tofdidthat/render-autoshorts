@@ -5073,7 +5073,9 @@ app.post(
               'onece-checkout',
               user.id,
               market,
-              customerId || user.email || ''
+              customerId || user.email || '',
+              existingSubscription?.stripe_subscription_id || 'none',
+              existingStatus || 'none'
             ].join(':')
           )
           .digest('hex')
