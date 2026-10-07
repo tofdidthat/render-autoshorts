@@ -1,5 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import multer from 'multer'
+import {validateStemsZip} from './stems-zip.js'
 const chunkSize=1024*1024
 export async function setupBeatLibrary(db){
  await db.query(`CREATE TABLE IF NOT EXISTS account_beats(id UUID PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,title TEXT NOT NULL,audio_hash TEXT NOT NULL,audio_size INTEGER NOT NULL,duration DOUBLE PRECISION,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(user_id,audio_hash))`)
@@ -68,6 +70,36 @@ export function registerBeatLibrary(router,{db,account}){
    res.json({beat:result.rows[0]})
   }catch(error){next(error)}
  })
+ const stemsUpload=multer({storage:multer.diskStorage({}),limits:{fileSize:500*1024*1024,files:1,fields:0,parts:1}}).single('stems')
+ router.post('/beats/:id/stems',account,(req,res,next)=>stemsUpload(req,res,async error=>{
+  const file=req.file
+  const cleanup=()=>{if(file?.path)try{fs.unlinkSync(file.path)}catch{}}
+  if(error){cleanup();return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:'Invalid stems upload.'})}
+  try{
+   if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(req.params.id)){cleanup();return res.sendStatus(404)}
+   if(!file){return res.status(400).json({error:'Stems ZIP is required.'})}
+   try{await validateStemsZip(file)}catch(error){return res.status(400).json({error:'Invalid stems ZIP: '+error.message})}
+   const hash=crypto.createHash('sha256')
+   let index=0
+   const client=await db.connect()
+   try{
+    await client.query('BEGIN')
+    const beat=await client.query('SELECT id FROM account_beats WHERE id=$1 AND user_id=$2 FOR UPDATE',[req.params.id,req.account.id])
+    if(!beat.rowCount){await client.query('ROLLBACK');return res.sendStatus(404)}
+    await client.query('DELETE FROM account_beat_stems WHERE beat_id=$1',[req.params.id])
+    for await(const chunk of fs.createReadStream(file.path,{highWaterMark:chunkSize})){
+     hash.update(chunk)
+     await client.query('INSERT INTO account_beat_stems(beat_id,chunk_index,data) VALUES($1,$2,$3)',[req.params.id,index++,chunk])
+    }
+    const name=String(file.originalname || 'stems.zip').split(/[\\\\/]/).pop().replace(/[\\r\\n\\u0000-\\u001f]/g,'').slice(0,220)
+    const size=fs.statSync(file.path).size
+    await client.query('UPDATE account_beats SET stems_name=$1,stems_size=$2,stems_hash=$3 WHERE id=$4 AND user_id=$5',[name,size,hash.digest('hex'),req.params.id,req.account.id])
+    await client.query('COMMIT')
+    res.status(201).json({ok:true,stems_name:name,stems_size:size})
+   }catch(error){try{await client.query('ROLLBACK')}catch{};throw error}
+   finally{client.release()}
+  }catch(error){next(error)}finally{cleanup()}
+ }))
  router.get('/beats/:id/audio',account,privateAsset('audio'))
  router.get('/beats/:id/stems',account,privateAsset('stems'))
  function privateAsset(kind){
